@@ -327,12 +327,67 @@
         if (typeof turndownPluginGfm !== 'undefined') ts.use(turndownPluginGfm.gfm);
         ts.escape = (s) => s;
 
+        function extractLatexFromNode(node) {
+            if (!node || !(node instanceof Element)) return null;
+
+            // Common custom attributes
+            const dataMath = node.getAttribute('data-math');
+            if (dataMath) return dataMath.trim();
+
+            // KaTeX stores original TeX here
+            const katexAnn = node.querySelector('annotation[encoding="application/x-tex"]');
+            if (katexAnn?.textContent) return katexAnn.textContent.trim();
+
+            // MathJax v2/v3 patterns
+            const mjxScript = node.querySelector('script[type="math/tex"], script[type="math/tex; mode=display"]');
+            if (mjxScript?.textContent) return mjxScript.textContent.trim();
+
+            // Fallback to textContent (last resort; often messy for rendered math)
+            const text = (node.textContent || '').trim();
+            return text || null;
+        }
+
+        function isBlockMathNode(node) {
+            if (!node || !(node instanceof Element)) return false;
+            if (node.classList.contains('math-block')) return true;
+            if (node.classList.contains('katex-display')) return true;
+            if (node.closest('.katex-display')) return true;
+            if (node.tagName === 'DIV') return true;
+            // MathJax v3 container
+            if (node.tagName === 'MJX-CONTAINER' && node.getAttribute('display') === 'block') return true;
+            return false;
+        }
+
+        // Math conversion
+        // Platforms vary a lot:
+        // - Gemini: may include math-* classes / data-math
+        // - ChatGPT: KaTeX (.katex / .katex-display + annotation[encoding="application/x-tex"])
+        // - Others: MathJax containers / scripts
         ts.addRule('math', {
-            filter: (n) => n.classList.contains('math-block') || n.classList.contains('math-inline') || n.tagName === 'MATHEMATICS',
+            filter: (n) => {
+                if (!(n instanceof Element)) return false;
+
+                // Original rules
+                if (n.classList.contains('math-block') || n.classList.contains('math-inline') || n.tagName === 'MATHEMATICS') return true;
+
+                // KaTeX
+                if (n.classList.contains('katex') || n.classList.contains('katex-display')) {
+                    // Avoid double-processing nested nodes inside KaTeX
+                    const parentKatex = n.parentElement?.closest('.katex, .katex-display');
+                    if (parentKatex && parentKatex !== n) return false;
+                    return true;
+                }
+
+                // MathJax
+                if (n.tagName === 'MJX-CONTAINER' || n.classList.contains('MathJax')) return true;
+
+                return false;
+            },
             replacement: (c, n) => {
-                const math = n.getAttribute('data-math') || n.textContent;
-                const isBlock = n.classList.contains('math-block') || n.tagName === 'DIV';
-                return isBlock ? `\n$$\n${math.trim()}\n$$\n` : `$${math.trim()}$`;
+                const math = extractLatexFromNode(n);
+                if (!math) return c;
+                const isBlock = isBlockMathNode(n);
+                return isBlock ? `\n$$\n${math}\n$$\n` : `$${math}$`;
             }
         });
 
