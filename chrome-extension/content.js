@@ -21,12 +21,19 @@
     async function getConfig() {
         return new Promise((resolve) => {
             chrome.storage.local.get(
-                ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey'],
+                ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'autoTitleEnabled'],
                 (items) => {
                 resolve(items);
                 }
             );
         });
+    }
+
+    function generateAutoTitle() {
+        // platform + creation time
+        // Use a filename-safe timestamp (no ':' which breaks on Windows/macOS Finder sync tools)
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        return `${platformName}-${ts}`;
     }
 
     /**
@@ -555,10 +562,14 @@
     }
 
     async function handleTransfer(block, target) {
-        const title = window.prompt(`Title for ${target}:`, `${platformName} Response`);
-        if (!title) return;
-
         const config = await getConfig();
+        const autoTitleEnabled = config.autoTitleEnabled !== false; // default ON
+
+        const title = autoTitleEnabled
+            ? generateAutoTitle()
+            : window.prompt(`Title for ${target}:`, `${platformName} Response`);
+
+        if (!title) return;
         const configUrl = target === 'Obsidian' ? config.obsidianUrl : '';
         const configKey = target === 'Obsidian' ? config.obsidianKey : config.notionKey;
 
