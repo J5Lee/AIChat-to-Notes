@@ -672,7 +672,13 @@
             // - http://127.0.0.1:27123/vault
             // We normalize to .../vault
             let base = (configUrl || '').trim().replace(/\/+$/g, '');
-            if (base && !/\/vault$/i.test(base)) base = `${base}/vault`;
+            // Users may enter either:
+            // - http://127.0.0.1:27123
+            // - http://127.0.0.1:27123/vault
+            // - https://example.com/vault/SubFolder
+            // Only append /vault when the URL does NOT already contain a /vault path segment.
+            // (Checking only "/vault$" breaks subfolder paths.)
+            if (base && !/\/vault(\/|$)/i.test(base)) base = `${base}/vault`;
 
             const fileName = `${title}.md`;
             const url = `${base}/${encodeURIComponent(fileName)}`;
