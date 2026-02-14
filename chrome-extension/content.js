@@ -5,7 +5,16 @@
     const isChatGptHost = host.includes('chatgpt.com') || host.includes('openai.com');
     const isGeminiHost = host.includes('gemini.google.com');
     const isNotebookLmHost = host.includes('notebooklm.google.com') || host.includes('notebooklm.googleusercontent.com');
-    const platformName = isNotebookLmHost ? 'NotebookLM' : (isChatGptHost ? 'ChatGPT' : 'Gemini');
+    const isClaudeHost = host.includes('claude.ai');
+    const isPerplexityHost = host.includes('perplexity.ai');
+
+    const platformName = isNotebookLmHost
+        ? 'NotebookLM'
+        : (isClaudeHost
+            ? 'Claude'
+            : (isPerplexityHost
+                ? 'Perplexity'
+                : (isChatGptHost ? 'ChatGPT' : 'Gemini')));
     if (!shouldRunInFrame()) return;
 
     // Helper: Get config from storage
@@ -73,10 +82,25 @@
             return getNotebookLmMessageBlocks();
         }
 
+        // NOTE: These selectors are intentionally broad to survive frequent DOM churn.
+        // - ChatGPT: data-message-author-role="assistant"
+        // - Claude: common patterns include assistant message containers with data-testid
+        // - Perplexity: often uses "prose"/"answer" containers
         const selectors = [
+            // ChatGPT
             'div[data-message-author-role="assistant"]',
             'article[data-testid^="conversation-turn-"][data-testid$="-assistant"]',
-            'main article[data-testid*="assistant"]'
+            'main article[data-testid*="assistant"]',
+
+            // Claude (best-effort)
+            '[data-testid*="assistant" i]',
+            '[data-testid*="message" i][data-testid*="assistant" i]',
+            'div[class*="assistant" i]',
+
+            // Perplexity (best-effort)
+            'div[class*="answer" i]',
+            'div[class*="response" i]',
+            'div[class*="prose" i]'
         ];
 
         const blockSet = new Set();
@@ -555,24 +579,56 @@
         const isObs = target === 'Obsidian';
 
         // Prepare request data
-        const requestData = {
-            action: isObs ? 'proxyRequest' : 'sendToNotion',
-            method: isObs ? "PUT" : "POST",
-            url: isObs ? `${configUrl}/${encodeURIComponent(title)}.md` : configUrl,
-            data: isObs ? md : { title, content: md },
-            headers: {
-                "Content-Type": isObs ? "text/markdown; charset=utf-8" : "application/json",
-                [isObs ? "Authorization" : "X-API-Key"]: isObs ? `Bearer ${configKey}` : configKey
-            },
-            // Metadata for specific handlers
-            title: title,
-            content: md,
-            config: {
-                notionKey: configKey,
-                notionParentId: config.notionParentId,
-                notionParentType: config.notionParentType || 'auto'
+        const requestData = (() => {
+            if (!isObs) {
+                return {
+                    action: 'sendToNotion',
+                    method: 'POST',
+                    url: configUrl,
+                    data: { title, content: md },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': configKey
+                    },
+                    title,
+                    content: md,
+                    config: {
+                        notionKey: configKey,
+                        notionParentId: config.notionParentId,
+                        notionParentType: config.notionParentType || 'auto'
+                    }
+                };
             }
-        };
+
+            // Obsidian Local REST API typically expects: PUT /vault/<path>
+            // Let users enter either:
+            // - http://127.0.0.1:27123
+            // - http://127.0.0.1:27123/vault
+            // We normalize to .../vault
+            let base = (configUrl || '').trim().replace(/\/+$/g, '');
+            if (base && !/\/vault$/i.test(base)) base = `${base}/vault`;
+
+            const fileName = `${title}.md`;
+            const url = `${base}/${encodeURIComponent(fileName)}`;
+
+            return {
+                action: 'proxyRequest',
+                method: 'PUT',
+                url,
+                data: md,
+                headers: {
+                    'Content-Type': 'text/markdown; charset=utf-8',
+                    'Authorization': `Bearer ${configKey}`
+                },
+                title,
+                content: md,
+                config: {
+                    notionKey: configKey,
+                    notionParentId: config.notionParentId,
+                    notionParentType: config.notionParentType || 'auto'
+                }
+            };
+        })();
 
         chrome.runtime.sendMessage(requestData, (response) => {
             if (response && response.success) {

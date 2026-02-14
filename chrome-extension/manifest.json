@@ -20,7 +20,10 @@
         "https://gemini.google.com/*",
         "https://notebooklm.google.com/*",
         "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://www.perplexity.ai/*",
+        "https://perplexity.ai/*"
       ],
       "all_frames": true,
       "js": ["libs/turndown.js", "libs/turndown-plugin-gfm.js", "content.js"]
