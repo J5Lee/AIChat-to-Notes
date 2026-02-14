@@ -532,7 +532,7 @@
         let blocks = getMessageBlocks().filter((b) => isEligibleBlock(b));
 
         // ChatGPT: focus on the most recent assistant responses to reduce DOM churn.
-        if (isChatGptHost && blocks.length > 2) blocks = blocks.slice(-2);
+        if (isChatGptHost && blocks.length > 5) blocks = blocks.slice(-5);
 
         blocks.forEach((block) => {
             // Ensure wrapper ends up at the bottom (reposition if needed)
