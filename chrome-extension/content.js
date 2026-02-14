@@ -531,8 +531,27 @@
 
         let blocks = getMessageBlocks().filter((b) => isEligibleBlock(b));
 
-        // ChatGPT: focus on the most recent assistant responses to reduce DOM churn.
-        if (isChatGptHost && blocks.length > 5) blocks = blocks.slice(-5);
+        // ChatGPT: favor blocks near the viewport so older answers become exportable when you scroll.
+        // Overscan: include 2 blocks above and below the visible range.
+        if (isChatGptHost) {
+            const visibleIdx = [];
+            const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+
+            blocks.forEach((block, idx) => {
+                const rect = block.getBoundingClientRect();
+                const isVisible = rect.bottom > 0 && rect.top < vh;
+                if (isVisible) visibleIdx.push(idx);
+            });
+
+            if (visibleIdx.length) {
+                const min = Math.max(0, Math.min(...visibleIdx) - 2);
+                const max = Math.min(blocks.length - 1, Math.max(...visibleIdx) + 2);
+                blocks = blocks.slice(min, max + 1);
+            } else if (blocks.length > 5) {
+                // Fallback if nothing is measurable (rare): keep a small tail.
+                blocks = blocks.slice(-5);
+            }
+        }
 
         blocks.forEach((block) => {
             // Ensure wrapper ends up at the bottom (reposition if needed)
