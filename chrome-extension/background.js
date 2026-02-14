@@ -338,6 +338,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    if (request.action === 'llmChatCompletions') {
+        const { url, body } = request;
+        fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body || {})
+        })
+            .then(async (response) => {
+                const txt = await response.text();
+                if (!response.ok) return sendResponse({ success: false, error: txt || `HTTP ${response.status}` });
+                try {
+                    const json = JSON.parse(txt);
+                    const title = json?.choices?.[0]?.message?.content?.trim() || '';
+                    return sendResponse({ success: true, title });
+                } catch (e) {
+                    return sendResponse({ success: false, error: `Invalid JSON: ${e?.message || e}` });
+                }
+            })
+            .catch((error) => sendResponse({ success: false, error: error.toString() }));
+        return true;
+    }
+
     if (request.action === 'proxyRequest') {
         const { method, url, data, headers } = request;
         fetch(url, {

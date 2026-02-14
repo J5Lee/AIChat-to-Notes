@@ -21,7 +21,7 @@
     async function getConfig() {
         return new Promise((resolve) => {
             chrome.storage.local.get(
-                ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'autoTitleEnabled'],
+                ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'titleMode', 'llmBaseUrl', 'llmModel', 'autoTitleEnabled'],
                 (items) => {
                 resolve(items);
                 }
@@ -34,6 +34,64 @@
         // Use a filename-safe timestamp (no ':' which breaks on Windows/macOS Finder sync tools)
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         return `${platformName}-${ts}`;
+    }
+
+    function sanitizeFileName(name, maxLen = 120) {
+        const cleaned = (name || '')
+            .replace(/[\\/:*?"<>|]/g, ' ') // Windows/portable
+            .replace(/\s+/g, ' ')
+            .trim();
+        return cleaned.slice(0, maxLen) || generateAutoTitle();
+    }
+
+    function inferTitleMode(config) {
+        // Back-compat with autoTitleEnabled
+        if (config?.titleMode) return config.titleMode;
+        if (config?.autoTitleEnabled === false) return 'prompt';
+        if (config?.llmBaseUrl) return 'llm';
+        return 'auto';
+    }
+
+    function sendMessageAsync(payload) {
+        return new Promise((resolve) => {
+            try {
+                chrome.runtime.sendMessage(payload, (resp) => resolve(resp));
+            } catch (e) {
+                resolve({ success: false, error: e?.message || String(e) });
+            }
+        });
+    }
+
+    async function generateTitleWithLocalLLM({ config, userPrompt, assistantMarkdown }) {
+        const baseUrl = (config?.llmBaseUrl || 'http://127.0.0.1:1234').replace(/\/+$/g, '');
+        const model = (config?.llmModel || '').trim();
+
+        // Keep it short for latency + privacy (don’t ship entire conversation)
+        const excerpt = (assistantMarkdown || '').replace(/^---[\s\S]*?---\n\n/, '').slice(0, 4000);
+        const up = (userPrompt || '').slice(0, 800);
+
+        const system = 'You generate concise note titles. Output ONLY the title text, no quotes, no punctuation at the end, no markdown.';
+        const user = `Language: English\n\nCreate a short, clear note title (4-10 words) based on the content. Avoid file-name forbidden chars \\ / : * ? " < > | .\n\nUser prompt:\n${up}\n\nAssistant content (excerpt):\n${excerpt}`;
+
+        const body = {
+            model: model || undefined,
+            messages: [
+                { role: 'system', content: system },
+                { role: 'user', content: user }
+            ],
+            temperature: 0.2,
+            max_tokens: 32
+        };
+
+        const resp = await sendMessageAsync({
+            action: 'llmChatCompletions',
+            url: `${baseUrl}/v1/chat/completions`,
+            body
+        });
+
+        if (!resp?.success) throw new Error(resp?.error || 'LLM title generation failed');
+        const title = resp?.title || '';
+        return sanitizeFileName(title);
     }
 
     /**
@@ -618,13 +676,44 @@
 
     async function handleTransfer(block, target) {
         const config = await getConfig();
-        const autoTitleEnabled = config.autoTitleEnabled !== false; // default ON
+        const titleMode = inferTitleMode(config);
 
-        const title = autoTitleEnabled
-            ? generateAutoTitle()
-            : window.prompt(`Title for ${target}:`, `${platformName} Response`);
+        const md = getConfiguredMarkdown(block, target);
+
+        // For LLM title generation, we want the user's last prompt if possible.
+        // Best-effort extraction (platforms differ).
+        const userPrompt = (() => {
+            try {
+                if (isGeminiHost) return '';
+                if (isNotebookLmHost) return '';
+                // ChatGPT-like
+                const users = Array.from(document.querySelectorAll('div[data-message-author-role="user"]'));
+                const last = users[users.length - 1];
+                return (last?.innerText || '').trim();
+            } catch {
+                return '';
+            }
+        })();
+
+        let title;
+        if (titleMode === 'prompt') {
+            title = window.prompt(`Title for ${target}:`, `${platformName} Response`);
+        } else if (titleMode === 'llm') {
+            try {
+                title = await generateTitleWithLocalLLM({ config, userPrompt, assistantMarkdown: md });
+            } catch (e) {
+                // fallback
+                title = generateAutoTitle();
+            }
+        } else {
+            title = generateAutoTitle();
+        }
 
         if (!title) return;
+        title = sanitizeFileName(title);
+
+        // (md was computed earlier)
+
         const configUrl = target === 'Obsidian' ? config.obsidianUrl : '';
         const configKey = target === 'Obsidian' ? config.obsidianKey : config.notionKey;
 
@@ -641,7 +730,6 @@
             return;
         }
 
-        const md = getConfiguredMarkdown(block, target);
         const isObs = target === 'Obsidian';
 
         // Prepare request data

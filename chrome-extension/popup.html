@@ -79,10 +79,18 @@
   <label for="obsidianKey">Obsidian API Key</label>
   <input type="password" id="obsidianKey" placeholder="Authorization Token">
 
-  <label for="autoTitleEnabled" style="font-weight: normal;">
-    <input type="checkbox" id="autoTitleEnabled" style="width: auto; margin-right: 6px; vertical-align: middle;"> 
-    Auto-generate note title (Platform + Time)
-  </label>
+  <label for="titleMode">Note Title Mode</label>
+  <select id="titleMode">
+    <option value="llm">Local LLM (LM Studio) — English</option>
+    <option value="auto">Auto (Platform + Time)</option>
+    <option value="prompt">Prompt (Manual)</option>
+  </select>
+
+  <label for="llmBaseUrl">LM Studio Base URL</label>
+  <input type="text" id="llmBaseUrl" placeholder="http://127.0.0.1:1234">
+
+  <label for="llmModel">LM Studio Model (optional)</label>
+  <input type="text" id="llmModel" placeholder="leave blank to use server default">
 
   <button id="save">Save Settings</button>
   <div id="status"></div>
