@@ -511,16 +511,33 @@
         return md;
     }
 
+    function isChatGptGenerating() {
+        if (!isChatGptHost) return false;
+        // Best-effort: while generating, ChatGPT typically shows a stop button.
+        const stop = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="정지" i]');
+        if (stop && isVisibleElement(stop)) return true;
+        return false;
+    }
+
     function injectButtons() {
         if (isNotebookLmHost) {
             injectNotebookLmButtons();
             return;
         }
 
-        const blocks = getMessageBlocks();
-        blocks.forEach(block => {
-            if (!isEligibleBlock(block)) return;
-            if (block.querySelector('.kb-btn-wrapper')) return;
+        // ChatGPT streams content; injecting mid-stream can place buttons in the middle.
+        // Only inject when generation is finished.
+        if (isChatGptHost && isChatGptGenerating()) return;
+
+        let blocks = getMessageBlocks().filter((b) => isEligibleBlock(b));
+
+        // ChatGPT: focus on the most recent assistant responses to reduce DOM churn.
+        if (isChatGptHost && blocks.length > 2) blocks = blocks.slice(-2);
+
+        blocks.forEach((block) => {
+            // Ensure wrapper ends up at the bottom (reposition if needed)
+            const existing = block.querySelector('.kb-btn-wrapper');
+            if (existing) existing.remove();
             const wrapper = createTransferButtons(block, false);
             block.append(wrapper);
         });
