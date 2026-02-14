@@ -70,27 +70,56 @@
         const excerpt = (assistantMarkdown || '').replace(/^---[\s\S]*?---\n\n/, '').slice(0, 4000);
         const up = (userPrompt || '').slice(0, 800);
 
-        const system = 'You generate concise note titles. Output ONLY the title text, no quotes, no punctuation at the end, no markdown.';
-        const user = `Language: English\n\nCreate a short, clear note title (4-10 words) based on the content. Avoid file-name forbidden chars \\ / : * ? " < > | .\n\nUser prompt:\n${up}\n\nAssistant content (excerpt):\n${excerpt}`;
+        const system = [
+            'You generate concise note titles.',
+            'Output MUST be English only.',
+            'Output ONLY the title text: no quotes, no markdown, no trailing period.',
+            'Avoid file-name forbidden chars: \\ / : * ? " < > |'
+        ].join(' ');
 
-        const body = {
+        const user = [
+            'Task: Create a short, clear English note title (4-10 words).',
+            'If the source text is Korean or mixed-language, translate concepts to English and still output English.',
+            'Return ONLY the title text on a single line.',
+            '',
+            'User prompt:',
+            up,
+            '',
+            'Assistant content (excerpt):',
+            excerpt
+        ].join('\n');
+
+        const makeBody = (extraInstruction) => ({
             model: model || undefined,
             messages: [
                 { role: 'system', content: system },
-                { role: 'user', content: user }
+                { role: 'user', content: extraInstruction ? `${user}\n\nExtra instruction: ${extraInstruction}` : user }
             ],
             temperature: 0.2,
             max_tokens: 32
-        };
+        });
 
-        const resp = await sendMessageAsync({
+        let resp = await sendMessageAsync({
             action: 'llmChatCompletions',
             url: `${baseUrl}/v1/chat/completions`,
-            body
+            body: makeBody('English only. Do not output any Korean characters.')
         });
 
         if (!resp?.success) throw new Error(resp?.error || 'LLM title generation failed');
-        const title = resp?.title || '';
+
+        let title = (resp?.title || '').trim();
+
+        // If the model ignored the instruction and returned Korean, retry once with stricter constraints.
+        if (/[\uAC00-\uD7AF]/.test(title)) {
+            resp = await sendMessageAsync({
+                action: 'llmChatCompletions',
+                url: `${baseUrl}/v1/chat/completions`,
+                body: makeBody('Rewrite the title in English ONLY. Use ASCII letters/spaces/digits if possible. Return ONE line only.')
+            });
+            if (resp?.success) title = (resp?.title || '').trim();
+        }
+
+        if (!resp?.success) throw new Error(resp?.error || 'LLM title generation failed');
         return sanitizeFileName(title);
     }
 
