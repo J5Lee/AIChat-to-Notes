@@ -519,7 +519,10 @@
         return false;
     }
 
-    function injectButtons() {
+    // Avoid repeated DOM churn: remember which blocks we've already processed.
+    const __kbInjectedBlocks = new WeakSet();
+
+    function injectButtons(passedBlocks = null) {
         if (isNotebookLmHost) {
             injectNotebookLmButtons();
             return;
@@ -529,11 +532,11 @@
         // Only inject when generation is finished.
         if (isChatGptHost && isChatGptGenerating()) return;
 
-        let blocks = getMessageBlocks().filter((b) => isEligibleBlock(b));
+        let blocks = (passedBlocks ? Array.from(passedBlocks) : getMessageBlocks())
+            .filter((b) => isEligibleBlock(b));
 
-        // ChatGPT: favor blocks near the viewport so older answers become exportable when you scroll.
-        // Overscan: include 2 blocks above and below the visible range.
-        if (isChatGptHost) {
+        // If we're doing a full scan (no passed blocks), prefer blocks near the viewport.
+        if (!passedBlocks && isChatGptHost) {
             const visibleIdx = [];
             const vh = window.innerHeight || document.documentElement.clientHeight || 0;
 
@@ -548,17 +551,24 @@
                 const max = Math.min(blocks.length - 1, Math.max(...visibleIdx) + 2);
                 blocks = blocks.slice(min, max + 1);
             } else if (blocks.length > 5) {
-                // Fallback if nothing is measurable (rare): keep a small tail.
                 blocks = blocks.slice(-5);
             }
         }
 
         blocks.forEach((block) => {
-            // Ensure wrapper ends up at the bottom (reposition if needed)
+            if (!block) return;
+            if (__kbInjectedBlocks.has(block)) return;
+
+            // If a wrapper already exists, treat as injected and don't touch DOM again.
             const existing = block.querySelector('.kb-btn-wrapper');
-            if (existing) existing.remove();
+            if (existing) {
+                __kbInjectedBlocks.add(block);
+                return;
+            }
+
             const wrapper = createTransferButtons(block, false);
             block.append(wrapper);
+            __kbInjectedBlocks.add(block);
         });
     }
 
@@ -864,5 +874,104 @@
         });
     }
 
-    setInterval(injectButtons, 2000);
+    // Instead of polling every 2s (which can jank typing on heavy SPA pages like ChatGPT),
+    // observe DOM changes and inject only for newly-added assistant message blocks.
+    function findRelevantBlocksFromNode(node) {
+        const blocks = new Set();
+        if (!node) return blocks;
+
+        const root = (node.nodeType === 1) ? node : node.parentElement;
+        if (!root) return blocks;
+
+        // ChatGPT selector first (most stable + specific)
+        const chatgptSelector = 'div[data-message-author-role="assistant"], article[data-testid^="conversation-turn-"][data-testid$="-assistant"], main article[data-testid*="assistant"]';
+
+        const direct = root.closest ? root.closest(chatgptSelector) : null;
+        if (direct) blocks.add(direct);
+
+        if (root.matches && root.matches(chatgptSelector)) blocks.add(root);
+
+        // Also catch any blocks inside newly-added subtrees
+        if (root.querySelectorAll) {
+            root.querySelectorAll(chatgptSelector).forEach((el) => blocks.add(el));
+        }
+
+        return blocks;
+    }
+
+    const scheduleInject = (() => {
+        let queued = false;
+        let pending = new Set();
+
+        const run = () => {
+            queued = false;
+            const blocks = pending;
+            pending = new Set();
+            injectButtons(blocks);
+        };
+
+        return (blocks) => {
+            if (blocks && blocks.size) {
+                blocks.forEach((b) => pending.add(b));
+            }
+            if (queued) return;
+            queued = true;
+
+            // Prefer idle time to avoid competing with typing/streaming.
+            if (typeof requestIdleCallback === 'function') {
+                requestIdleCallback(run, { timeout: 800 });
+            } else {
+                setTimeout(run, 150);
+            }
+        };
+    })();
+
+    // Initial best-effort injection
+    scheduleInject(new Set(getMessageBlocks().slice(-5)));
+
+    const observeRoot = document.querySelector('main') || document.body;
+
+    // During generation, ChatGPT mutates DOM very frequently. Instead of injecting during the stream
+    // (which can jank typing), we arm a lightweight debounced "generation finished" trigger.
+    let __kbGenDoneTimer = null;
+    function armInjectAfterGeneration() {
+        if (!isChatGptHost) return;
+        if (__kbGenDoneTimer) return;
+
+        const check = () => {
+            __kbGenDoneTimer = null;
+            if (isChatGptGenerating()) {
+                // Still generating; keep waiting.
+                __kbGenDoneTimer = setTimeout(check, 400);
+                return;
+            }
+
+            // Small debounce to let final DOM settle.
+            setTimeout(() => {
+                scheduleInject(new Set(getMessageBlocks().slice(-5)));
+            }, 120);
+        };
+
+        __kbGenDoneTimer = setTimeout(check, 400);
+    }
+
+    const mo = new MutationObserver((mutations) => {
+        if (isChatGptHost && isChatGptGenerating()) {
+            armInjectAfterGeneration();
+            return;
+        }
+
+        const found = new Set();
+        for (const m of mutations) {
+            if (m.addedNodes && m.addedNodes.length) {
+                m.addedNodes.forEach((n) => {
+                    findRelevantBlocksFromNode(n).forEach((b) => found.add(b));
+                });
+            }
+        }
+
+        if (found.size) scheduleInject(found);
+    });
+
+    mo.observe(observeRoot, { childList: true, subtree: true });
 })();
