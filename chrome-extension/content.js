@@ -392,7 +392,9 @@
 
     function isEligibleBlock(block) {
         if (!block) return false;
+        // Wrapper may be placed after the block on ChatGPT, so check both inside + immediate sibling.
         if (block.querySelector('.kb-btn-wrapper')) return false;
+        if (block.nextElementSibling && block.nextElementSibling.classList && block.nextElementSibling.classList.contains('kb-btn-wrapper')) return false;
         if (block.closest('form')) return false;
 
         const text = (block.innerText || '').trim();
@@ -513,9 +515,23 @@
 
     function isChatGptGenerating() {
         if (!isChatGptHost) return false;
+
         // Best-effort: while generating, ChatGPT typically shows a stop button.
-        const stop = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="정지" i]');
+        // ChatGPT UI changes frequently, so keep this selector list broad.
+        const stop = document.querySelector([
+            'button[data-testid="stop-button"]',
+            'button[aria-label*="stop generating" i]',
+            'button[aria-label*="stop" i]',
+            'button[aria-label*="정지" i]',
+            'button[title*="stop" i]',
+            'button[data-testid*="stop" i]'
+        ].join(','));
         if (stop && isVisibleElement(stop)) return true;
+
+        // Another heuristic: ChatGPT sometimes marks the latest assistant turn as busy.
+        const busy = document.querySelector('div[data-message-author-role="assistant"][aria-busy="true"], article[aria-busy="true"]');
+        if (busy && isVisibleElement(busy)) return true;
+
         return false;
     }
 
@@ -560,14 +576,33 @@
             if (__kbInjectedBlocks.has(block)) return;
 
             // If a wrapper already exists, treat as injected and don't touch DOM again.
-            const existing = block.querySelector('.kb-btn-wrapper');
-            if (existing) {
+            // For ChatGPT, we may place the wrapper *after* the block (as a sibling) to avoid
+            // streaming updates pushing the wrapper into the middle of the answer.
+            const existingInside = block.querySelector('.kb-btn-wrapper');
+            const existingSibling = block.nextElementSibling && block.nextElementSibling.classList && block.nextElementSibling.classList.contains('kb-btn-wrapper')
+                ? block.nextElementSibling
+                : null;
+            if (existingInside || existingSibling) {
                 __kbInjectedBlocks.add(block);
                 return;
             }
 
             const wrapper = createTransferButtons(block, false);
-            block.append(wrapper);
+
+            if (isChatGptHost) {
+                // Critical: ChatGPT streams by appending nodes into the assistant block.
+                // If we append our wrapper into the block mid-stream, later nodes will appear *after* it,
+                // making the button land in the middle of the answer.
+                // Putting it after the block (sibling) keeps it visually at the end.
+                try {
+                    block.insertAdjacentElement('afterend', wrapper);
+                } catch {
+                    block.append(wrapper);
+                }
+            } else {
+                block.append(wrapper);
+            }
+
             __kbInjectedBlocks.add(block);
         });
     }
