@@ -127,6 +127,26 @@
      * Advanced Post-processing for Obsidian
      */
     function postProcessForObsidian(md) {
+        // 0. ChatGPT UI artifacts cleanup (best-effort)
+        // Some ChatGPT code blocks are converted into:
+        //   python\n\nCopy code\n\n`...`
+        // or:
+        //   mermaid\n\nCopy code\n\n`flowchart ...`
+        // Convert those into fenced blocks.
+        md = md.replace(/^([a-zA-Z0-9_+-]+)\s*\n\s*Copy code\s*\n\s*`([\s\S]*?)`\s*$/gmi, (m, lang, code) => {
+            const l = String(lang || '').trim().toLowerCase();
+            const body = String(code || '').replace(/\r\n/g, '\n').trim();
+            // only convert known-ish short language tags to avoid false positives
+            if (l.length > 16) return m;
+            return `\n\n\
+\
+\
+\`\`\`${l}\n${body}\n\`\`\`\n\n`;
+        });
+
+        // Remove stray "Copy code" lines that still leak through.
+        md = md.replace(/^Copy code\s*$/gmi, '');
+
         // 1. Unescape backslashes before markdown symbols
         md = md.replace(/\\([$_\*#])/g, '$1');
 
@@ -146,6 +166,9 @@
         // 4. [LIST SPACING FIX] Remove blank lines between consecutive list items
         md = md.replace(/^(\d+\..+)\n\n(?=\d+\.)/gm, '$1\n');
         md = md.replace(/^(-.+)\n\n(?=-\s)/gm, '$1\n');
+        // Also fix nested lists that Turndown sometimes emits with leading space + dash
+        md = md.replace(/^\s+-\s*\n/gm, '');
+        md = md.replace(/^(\s*- .+)\n\n(?=\s*-\s)/gm, '$1\n');
 
         // 5. [HORIZONTAL RULE FIX] Force blank lines around standalone ---
         md = md.replace(/^(.*\S.*)(\n)(---)\s*$/gm, '$1\n\n$3');  // text\n--- -> text\n\n---
