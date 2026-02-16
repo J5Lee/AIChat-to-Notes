@@ -54,24 +54,31 @@
       color: green;
       text-align: center;
     }
+
+    .hidden {
+      display: none;
+    }
   </style>
 </head>
 
 <body>
   <h2>AIChat-to-Notes Settings</h2>
 
-  <label for="notionKey">Notion Integration Token</label>
-  <input type="password" id="notionKey" placeholder="secret_...">
+  <!-- Notion settings are intentionally hidden until Obsidian testing is complete. -->
+  <div id="notionSettings" class="hidden">
+    <label for="notionKey">Notion Integration Token</label>
+    <input type="password" id="notionKey" placeholder="secret_...">
 
-  <label for="notionParentId">Notion Parent ID (Page or Database)</label>
-  <input type="text" id="notionParentId" placeholder="32-char ID (with or without hyphens)">
+    <label for="notionParentId">Notion Parent ID (Page or Database)</label>
+    <input type="text" id="notionParentId" placeholder="32-char ID (with or without hyphens)">
 
-  <label for="notionParentType">Notion Parent Type</label>
-  <select id="notionParentType">
-    <option value="auto">Auto Detect (Recommended)</option>
-    <option value="page">Page</option>
-    <option value="database">Database</option>
-  </select>
+    <label for="notionParentType">Notion Parent Type</label>
+    <select id="notionParentType">
+      <option value="auto">Auto Detect (Recommended)</option>
+      <option value="page">Page</option>
+      <option value="database">Database</option>
+    </select>
+  </div>
 
   <label for="obsidianUrl">Obsidian Local REST API URL</label>
   <input type="text" id="obsidianUrl" placeholder="http://127.0.0.1:27123/vault/...">

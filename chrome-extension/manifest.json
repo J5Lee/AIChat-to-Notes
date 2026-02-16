@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AIChat-to-Notes",
   "version": "1.0",
-  "description": "Send Gemini, ChatGPT, and NotebookLM responses to Notion and Obsidian",
+  "description": "Send Gemini, ChatGPT, and NotebookLM responses to Obsidian (Notion UI hidden for now)",
   "permissions": [
     "activeTab",
     "scripting",

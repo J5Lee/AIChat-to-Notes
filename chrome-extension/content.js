@@ -726,11 +726,12 @@
         const wrapper = document.createElement('div');
         wrapper.className = 'kb-btn-wrapper';
         wrapper.style = getButtonWrapperStyle(notebookLmMode);
-        const nBtn = createBtn('Send to Notion', '#000');
+
+        // Notion button intentionally hidden until Obsidian testing is complete.
         const oBtn = createBtn('Send to Obsidian', '#483699');
-        nBtn.onclick = () => handleTransfer(block, 'Notion');
         oBtn.onclick = () => handleTransfer(block, 'Obsidian');
-        wrapper.append(nBtn, oBtn);
+
+        wrapper.append(oBtn);
         return wrapper;
     }
 
