@@ -147,6 +147,14 @@
         // Remove stray "Copy code" lines that still leak through.
         md = md.replace(/^Copy code\s*$/gmi, '');
 
+        // 0.5. Convert <details>/<summary> blocks into plain markdown.
+        // Obsidian can be finicky about rendering LaTeX inside raw HTML details tags.
+        md = md.replace(/<details>\s*<summary>([\s\S]*?)<\/summary>/gmi, (m, summary) => {
+            const title = String(summary || '').replace(/<[^>]*>/g, '').trim();
+            return `\n\n---\n\n### ${title}\n\n`;
+        });
+        md = md.replace(/<\/details>/gmi, '\n\n');
+
         // 1. Unescape backslashes before markdown symbols
         md = md.replace(/\\([$_\*#])/g, '$1');
 
@@ -162,6 +170,10 @@
         // 3.5. [BLOCK MATH SPACING] Remove blank lines around block math $$
         md = md.replace(/\n\n(\$\$\n)/g, '\n$1');   // blank line before opening $$
         md = md.replace(/(\n\$\$)\n\n/g, '$1\n');   // blank line after closing $$
+
+        // 3.6. [MATH→TABLE SPACING] Obsidian table rendering often fails if a table starts
+        // immediately after a closing $$ without a blank line.
+        md = md.replace(/(\n\$\$)\n(?=\|)/g, '$1\n\n');
 
         // 4. [LIST SPACING FIX] Remove blank lines between consecutive list items
         md = md.replace(/^(\d+\..+)\n\n(?=\d+\.)/gm, '$1\n');
