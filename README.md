@@ -5,12 +5,8 @@
 # AIChat-to-Notes
 A Chrome extension that exports responses from web AIs into your notes.
 
-**Current focus (today):**
 - Web AI: **ChatGPT** (best supported right now)
 - Notes: **Obsidian** (formatting work-in-progress)
-
-**Roadmap direction:**
-- Web AI will focus on **Gemini** and **NotebookLM**
 
 ## Motivation
 
