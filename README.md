@@ -11,7 +11,6 @@ A Chrome extension that exports responses from web AIs into your notes.
 
 **Roadmap direction:**
 - Web AI will focus on **Gemini** and **NotebookLM**
-- Notes destination will shift to **Notion**
 
 ## Motivation
 
@@ -64,20 +63,6 @@ Click the extension icon and open settings:
 3. Under each assistant response, click **Send to Obsidian**.
 4. Choose/confirm the note title (depends on your Title Mode).
 5. The extension writes a Markdown file to your Obsidian vault via the Local REST API.
-
-### Supported Web AIs
-
-- ChatGPT: ✅ best supported (streaming-safe button injection)
-- Gemini: ✅ supported
-- NotebookLM: ✅ supported (button placement varies by UI)
-
-> Forward direction: we plan to focus web AI support on **Gemini + NotebookLM**.
-
-## Roadmap (direction)
-
-- **Web AI focus:** Gemini, NotebookLM
-- **Notes destination:** Notion (planned)
-- **Current state:** Obsidian export enabled while formatting is being validated.
 
 ---
 
