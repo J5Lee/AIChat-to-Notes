@@ -1,0 +1,16 @@
+# Local-only configuration for AIChat-to-Notes
+# Copy this file to .api and fill in your own values.
+# Lines starting with #, ;, // are ignored.
+
+OBSIDIAN_URL=http://127.0.0.1:27123
+OBSIDIAN_KEY=your-obsidian-api-key
+
+# Optional
+TITLE_MODE=llm
+LLM_BASE_URL=http://127.0.0.1:1234
+LLM_MODEL=
+
+# Optional (currently hidden in UI)
+# NOTION_KEY=secret_xxx
+# NOTION_PARENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# NOTION_PARENT_TYPE=auto

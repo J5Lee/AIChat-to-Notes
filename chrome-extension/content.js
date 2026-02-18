@@ -17,16 +17,13 @@
                 : (isChatGptHost ? 'ChatGPT' : 'Gemini')));
     if (!shouldRunInFrame()) return;
 
-    // Helper: Get config from storage
+    const CONFIG_KEYS = ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'titleMode', 'llmBaseUrl', 'llmModel', 'autoTitleEnabled'];
+
+    // Helper: Get config (storage + .api fallback via background)
     async function getConfig() {
-        return new Promise((resolve) => {
-            chrome.storage.local.get(
-                ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'titleMode', 'llmBaseUrl', 'llmModel', 'autoTitleEnabled'],
-                (items) => {
-                resolve(items);
-                }
-            );
-        });
+        const merged = await sendMessageAsync({ action: 'getMergedConfig' });
+        if (merged?.success && merged?.config) return merged.config;
+        return new Promise((resolve) => chrome.storage.local.get(CONFIG_KEYS, (items) => resolve(items || {})));
     }
 
     function generateAutoTitle() {
@@ -64,7 +61,18 @@
 
     async function generateTitleWithLocalLLM({ config, userPrompt, assistantMarkdown }) {
         const baseUrl = (config?.llmBaseUrl || 'http://127.0.0.1:1234').replace(/\/+$/g, '');
-        const model = (config?.llmModel || '').trim();
+        let model = (config?.llmModel || '').trim();
+
+        // If no model was configured, auto-pick the first model from /v1/models.
+        if (!model) {
+            const modelResp = await sendMessageAsync({
+                action: 'llmListModels',
+                url: `${baseUrl}/v1/models`
+            });
+            if (modelResp?.success && Array.isArray(modelResp.models) && modelResp.models.length > 0) {
+                model = modelResp.models[0];
+            }
+        }
 
         // Keep it short for latency + privacy (don’t ship entire conversation)
         const excerpt = (assistantMarkdown || '').replace(/^---[\s\S]*?---\n\n/, '').slice(0, 4000);
@@ -848,7 +856,8 @@
             try {
                 title = await generateTitleWithLocalLLM({ config, userPrompt, assistantMarkdown: md });
             } catch (e) {
-                // fallback
+                const reason = e?.message || String(e);
+                alert(`LLM title generation failed. Falling back to auto title.\n\n${reason}`);
                 title = generateAutoTitle();
             }
         } else {

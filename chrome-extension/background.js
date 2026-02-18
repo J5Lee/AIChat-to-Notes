@@ -1,3 +1,107 @@
+const CONFIG_KEYS = [
+    'notionKey',
+    'notionParentId',
+    'notionParentType',
+    'obsidianUrl',
+    'obsidianKey',
+    'titleMode',
+    'llmBaseUrl',
+    'llmModel',
+    'autoTitleEnabled'
+];
+
+const API_FILE_KEY_TO_CONFIG_KEY = {
+    NOTION_KEY: 'notionKey',
+    NOTION_PARENT_ID: 'notionParentId',
+    NOTION_PARENT_TYPE: 'notionParentType',
+    OBSIDIAN_URL: 'obsidianUrl',
+    OBSIDIAN_KEY: 'obsidianKey',
+    TITLE_MODE: 'titleMode',
+    LLM_BASE_URL: 'llmBaseUrl',
+    LLM_MODEL: 'llmModel'
+};
+
+function stripWrappingQuotes(value) {
+    if (value.length < 2) return value;
+    const startsWithSingle = value.startsWith('\'') && value.endsWith('\'');
+    const startsWithDouble = value.startsWith('"') && value.endsWith('"');
+    return (startsWithSingle || startsWithDouble) ? value.slice(1, -1) : value;
+}
+
+function normalizeConfigValue(key, value) {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return '';
+
+    if (key === 'titleMode') {
+        const normalized = trimmed.toLowerCase();
+        return ['llm', 'auto', 'prompt'].includes(normalized) ? normalized : '';
+    }
+
+    if (key === 'notionParentType') {
+        const normalized = trimmed.toLowerCase();
+        return ['auto', 'page', 'database'].includes(normalized) ? normalized : '';
+    }
+
+    return trimmed;
+}
+
+function parseDotApiConfig(text) {
+    const config = {};
+    for (const rawLine of String(text || '').split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#') || line.startsWith(';') || line.startsWith('//')) continue;
+
+        const separatorIndex = line.indexOf('=');
+        if (separatorIndex < 0) continue;
+
+        const rawKey = line.slice(0, separatorIndex).trim().toUpperCase();
+        const configKey = API_FILE_KEY_TO_CONFIG_KEY[rawKey];
+        if (!configKey) continue;
+
+        const rawValue = stripWrappingQuotes(line.slice(separatorIndex + 1).trim());
+        const normalizedValue = normalizeConfigValue(configKey, rawValue);
+        if (normalizedValue) config[configKey] = normalizedValue;
+    }
+    return config;
+}
+
+async function readDotApiConfig() {
+    try {
+        const response = await fetch(chrome.runtime.getURL('.api'), { cache: 'no-store' });
+        if (!response.ok) return {};
+        const text = await response.text();
+        return parseDotApiConfig(text);
+    } catch {
+        return {};
+    }
+}
+
+function getStorageConfig() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(CONFIG_KEYS, (items) => resolve(items || {}));
+    });
+}
+
+function hasConfigValue(value) {
+    if (typeof value === 'string') return value.trim().length > 0;
+    return value !== undefined && value !== null;
+}
+
+function mergeConfig(storageConfig, fileConfig) {
+    const merged = { ...storageConfig };
+    for (const [key, fileValue] of Object.entries(fileConfig)) {
+        if (!hasConfigValue(storageConfig[key]) && hasConfigValue(fileValue)) {
+            merged[key] = fileValue;
+        }
+    }
+    return merged;
+}
+
+async function resolveMergedConfig() {
+    const [storageConfig, fileConfig] = await Promise.all([getStorageConfig(), readDotApiConfig()]);
+    return mergeConfig(storageConfig, fileConfig);
+}
+
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 
@@ -317,6 +421,18 @@ async function createNotionPage({ token, title, markdown, parentId, parentType }
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'getMergedConfig') {
+        (async () => {
+            try {
+                const config = await resolveMergedConfig();
+                sendResponse({ success: true, config });
+            } catch (error) {
+                sendResponse({ success: false, error: error.message || String(error), config: {} });
+            }
+        })();
+        return true;
+    }
+
     if (request.action === 'sendToNotion') {
         (async () => {
             try {
@@ -352,7 +468,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 if (!response.ok) return sendResponse({ success: false, error: txt || `HTTP ${response.status}` });
                 try {
                     const json = JSON.parse(txt);
-                    const title = json?.choices?.[0]?.message?.content?.trim() || '';
+                    const title = (
+                        json?.choices?.[0]?.message?.content
+                        || json?.choices?.[0]?.text
+                        || ''
+                    ).trim();
                     return sendResponse({ success: true, title });
                 } catch (e) {
                     return sendResponse({ success: false, error: `Invalid JSON: ${e?.message || e}` });
@@ -362,18 +482,65 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    if (request.action === 'llmListModels') {
+        const { url } = request;
+        fetch(url, { method: 'GET' })
+            .then(async (response) => {
+                const txt = await response.text();
+                if (!response.ok) return sendResponse({ success: false, error: txt || `HTTP ${response.status}`, models: [] });
+                try {
+                    const json = JSON.parse(txt);
+                    const models = Array.isArray(json?.data)
+                        ? json.data.map((item) => String(item?.id || '').trim()).filter(Boolean)
+                        : [];
+                    return sendResponse({ success: true, models });
+                } catch (e) {
+                    return sendResponse({ success: false, error: `Invalid JSON: ${e?.message || e}`, models: [] });
+                }
+            })
+            .catch((error) => sendResponse({ success: false, error: error.toString(), models: [] }));
+        return true;
+    }
+
     if (request.action === 'proxyRequest') {
         const { method, url, data, headers } = request;
-        fetch(url, {
+        let resolvedUrl;
+        try {
+            resolvedUrl = new URL(String(url || '')).toString();
+        } catch {
+            sendResponse({ success: false, error: `Invalid URL: ${url || '(empty)'}` });
+            return true;
+        }
+
+        fetch(resolvedUrl, {
             method,
             headers,
             body: typeof data === 'object' ? JSON.stringify(data) : data
         })
-            .then((response) => {
-                if (response.ok) sendResponse({ success: true });
-                else response.text().then((text) => sendResponse({ success: false, error: text }));
+            .then(async (response) => {
+                if (response.ok) {
+                    sendResponse({ success: true });
+                    return;
+                }
+
+                const text = (await response.text()).trim();
+                const detail = text || `HTTP ${response.status}`;
+                sendResponse({
+                    success: false,
+                    error: `HTTP ${response.status} from ${resolvedUrl}: ${detail}`
+                });
             })
-            .catch((error) => sendResponse({ success: false, error: error.toString() }));
+            .catch((error) => {
+                const message = error?.message || String(error);
+                if (/Failed to fetch/i.test(message)) {
+                    sendResponse({
+                        success: false,
+                        error: `Network error for ${resolvedUrl}. Check OBSIDIAN_URL and ensure the Obsidian Local REST API is reachable.`
+                    });
+                    return;
+                }
+                sendResponse({ success: false, error: message });
+            });
         return true;
     }
 });

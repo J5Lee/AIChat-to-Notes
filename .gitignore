@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.api
+chrome-extension/.api
 .idea/
 .vscode/
 project.md
