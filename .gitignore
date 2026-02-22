@@ -6,4 +6,5 @@ __pycache__/
 chrome-extension/.api
 .idea/
 .vscode/
+.git*
 project.md
