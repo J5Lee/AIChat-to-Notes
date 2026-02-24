@@ -8,3 +8,4 @@ chrome-extension/.api
 .vscode/
 .git*
 project.md
+output/playwright/

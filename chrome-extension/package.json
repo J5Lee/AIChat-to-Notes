@@ -1,5 +1,12 @@
 {
   "name": "aichat-to-notes-mock",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "perf:baseline:run": "node scripts/openclaw-baseline.mjs",
+    "perf:baseline:batch": "bash scripts/run-openclaw-baseline.sh"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0"
+  }
 }
