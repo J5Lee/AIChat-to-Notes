@@ -23,10 +23,9 @@
     const CHATGPT_STOP_SELECTOR = [
         'button[data-testid="stop-button"]',
         'button[aria-label*="stop generating" i]',
-        'button[aria-label*="stop" i]',
-        'button[aria-label*="정지" i]',
-        'button[title*="stop" i]',
-        'button[data-testid*="stop" i]'
+        'button[aria-label*="생성 중지" i]',
+        'button[aria-label*="생성을 중지" i]',
+        'button[aria-label*="정지" i]'
     ].join(',');
     const CHATGPT_BUSY_SELECTOR = 'div[data-message-author-role="assistant"][aria-busy="true"], article[aria-busy="true"]';
     const GENERATION_STATE_CACHE_TTL_MS = 250;
@@ -738,17 +737,25 @@
 
             blocks.forEach((block) => {
                 if (!block) return;
-                if (__kbInjectedBlocks.has(block) || __kbPendingInjectedBlocks.has(block)) return;
 
-                // If a wrapper already exists, treat as injected and don't touch DOM again.
-                const existingInside = block.querySelector('.kb-btn-wrapper');
-                const existingSibling = block.nextElementSibling && block.nextElementSibling.classList && block.nextElementSibling.classList.contains('kb-btn-wrapper')
-                    ? block.nextElementSibling
-                    : null;
-                if (existingInside || existingSibling) {
+                // If a wrapper already exists, keep cache state in sync and skip.
+                const hasWrapperInside = Boolean(block.querySelector('.kb-btn-wrapper'));
+                const hasWrapperSibling = Boolean(
+                    block.nextElementSibling
+                    && block.nextElementSibling.classList
+                    && block.nextElementSibling.classList.contains('kb-btn-wrapper')
+                );
+                if (hasWrapperInside || hasWrapperSibling) {
                     __kbInjectedBlocks.add(block);
                     return;
                 }
+
+                // ChatGPT can re-render and remove our wrapper while keeping the same message block node.
+                // In that case, clear cache so the button can be re-injected.
+                if (__kbInjectedBlocks.has(block)) {
+                    __kbInjectedBlocks.delete(block);
+                }
+                if (__kbPendingInjectedBlocks.has(block)) return;
 
                 const wrapper = createTransferButtons(block, false);
                 __kbPendingInjectedBlocks.add(block);
