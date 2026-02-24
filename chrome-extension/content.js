@@ -18,20 +18,30 @@
     if (!shouldRunInFrame()) return;
 
     const CONFIG_KEYS = ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'titleMode', 'llmBaseUrl', 'llmModel', 'autoTitleEnabled'];
-    const CHATGPT_BLOCK_SELECTOR = 'div[data-message-author-role="assistant"], article[data-testid^="conversation-turn-"][data-testid$="-assistant"], main article[data-testid*="assistant"]';
-    const CHATGPT_USER_SELECTOR = 'div[data-message-author-role="user"]';
+    const CHATGPT_BLOCK_SELECTOR = [
+        '[data-message-author-role="assistant"]',
+        'article[data-testid^="conversation-turn-"][data-testid$="-assistant"]',
+        '[data-testid^="conversation-turn-"][data-testid$="-assistant"]',
+        'main article[data-testid*="assistant"]'
+    ].join(',');
+    const CHATGPT_USER_SELECTOR = '[data-message-author-role="user"]';
     const CHATGPT_STOP_SELECTOR = [
         'button[data-testid="stop-button"]',
         'button[aria-label*="stop generating" i]',
         'button[aria-label*="생성 중지" i]',
-        'button[aria-label*="생성을 중지" i]',
-        'button[aria-label*="정지" i]'
+        'button[aria-label*="생성을 중지" i]'
     ].join(',');
-    const CHATGPT_BUSY_SELECTOR = 'div[data-message-author-role="assistant"][aria-busy="true"], article[aria-busy="true"]';
+    const CHATGPT_BUSY_SELECTOR = [
+        '[data-message-author-role="assistant"][aria-busy="true"]',
+        'article[aria-busy="true"]',
+        '[data-testid*="assistant"][aria-busy="true"]'
+    ].join(',');
     const GENERATION_STATE_CACHE_TTL_MS = 250;
     const MAX_PENDING_BLOCKS = 16;
     const MAX_MUTATION_NODES_PER_BATCH = 60;
     const NOTEBOOK_INJECT_MIN_INTERVAL_MS = 700;
+    const CHATGPT_SELF_HEAL_INTERVAL_MS = 3500;
+    const CHATGPT_SELF_HEAL_COOLDOWN_MS = 1200;
     const DOM_COMMIT_FALLBACK_DELAY_MS = 16;
     const KB_STYLE_TAG_ID = 'kb-aichat-notes-style';
     const KB_PERF_PREFIX = 'kb:perf';
@@ -48,6 +58,7 @@
     let __kbLastNotebookInjectAt = 0;
     let __kbStyleInjected = false;
     let __kbPerfMeasureSeq = 0;
+    let __kbLastSelfHealAt = 0;
 
     function ensureUiStyles() {
         if (__kbStyleInjected) return;
@@ -871,6 +882,46 @@
         return blocks[blocks.length - 1] || null;
     }
 
+    function maybeSelfHealChatGptInjection(trigger = 'unknown') {
+        if (!isChatGptHost) return;
+        if (document.visibilityState === 'hidden') return;
+        if (isChatGptGenerating()) return;
+
+        const now = Date.now();
+        if (now - __kbLastSelfHealAt < CHATGPT_SELF_HEAL_COOLDOWN_MS) return;
+
+        const hasAssistant = Boolean(document.querySelector(CHATGPT_BLOCK_SELECTOR));
+        if (!hasAssistant) return;
+
+        if (!document.querySelector('.kb-btn-wrapper')) {
+            __kbLastSelfHealAt = now;
+            scheduleInject(new Set(getMessageBlocks().slice(-5)));
+            return;
+        }
+
+        const recentBlocks = getMessageBlocks()
+            .slice(-6)
+            .filter((b) => isEligibleBlock(b));
+        if (!recentBlocks.length) return;
+
+        const missing = recentBlocks.filter((block) => {
+            if (!block || !block.isConnected) return false;
+            if (block.querySelector('.kb-btn-wrapper')) return false;
+            const sibling = block.nextElementSibling;
+            if (sibling && sibling.classList && sibling.classList.contains('kb-btn-wrapper')) return false;
+            return true;
+        });
+
+        if (missing.length) {
+            __kbLastSelfHealAt = now;
+            scheduleInject(new Set(missing.slice(-MAX_PENDING_BLOCKS)));
+            return;
+        }
+
+        // Keep trigger for debugging without noisy logs.
+        void trigger;
+    }
+
     function findCopyButton(root) {
         const selectors = [
             'button[aria-label*="copy" i]',
@@ -1133,6 +1184,9 @@
 
     // Initial best-effort injection
     scheduleInject(new Set(getMessageBlocks().slice(-5)));
+    if (isChatGptHost) {
+        setTimeout(() => maybeSelfHealChatGptInjection('initial'), 500);
+    }
 
     const observeRoot = document.querySelector('main') || document.body;
 
@@ -1197,4 +1251,19 @@
     });
 
     mo.observe(observeRoot, { childList: true, subtree: true });
+
+    if (isChatGptHost) {
+        const onWake = () => {
+            setTimeout(() => maybeSelfHealChatGptInjection('wake'), 120);
+        };
+        window.addEventListener('focus', onWake, { passive: true });
+        window.addEventListener('pageshow', onWake, { passive: true });
+        window.addEventListener('popstate', onWake, { passive: true });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') onWake();
+        });
+        setInterval(() => {
+            maybeSelfHealChatGptInjection('interval');
+        }, CHATGPT_SELF_HEAL_INTERVAL_MS);
+    }
 })();
