@@ -33,9 +33,67 @@
     const MAX_PENDING_BLOCKS = 16;
     const MAX_MUTATION_NODES_PER_BATCH = 60;
     const NOTEBOOK_INJECT_MIN_INTERVAL_MS = 700;
+    const DOM_COMMIT_FALLBACK_DELAY_MS = 16;
+    const KB_STYLE_TAG_ID = 'kb-aichat-notes-style';
+    const KB_PERF_PREFIX = 'kb:perf';
+    const KB_STYLE_TEXT = [
+        '.kb-btn-wrapper{display:flex;gap:8px;justify-content:flex-end;width:100%;}',
+        '.kb-btn-wrapper--chat{margin-top:15px;padding-top:10px;border-top:1px solid #eee;margin-left:auto;align-self:flex-end;}',
+        '.kb-btn-wrapper--notebook{margin:2px 0 8px;}',
+        '.kb-btn{padding:6px 14px;cursor:pointer;color:#fff;border:none;border-radius:6px;font-weight:700;font-size:11px;line-height:1.2;}',
+        '.kb-btn--obsidian{background:#483699;}',
+        '.kb-btn:disabled{opacity:.7;cursor:not-allowed;}'
+    ].join('');
 
     let __kbGeneratingCache = { at: 0, value: false };
     let __kbLastNotebookInjectAt = 0;
+    let __kbStyleInjected = false;
+    let __kbPerfMeasureSeq = 0;
+
+    function ensureUiStyles() {
+        if (__kbStyleInjected) return;
+        const root = document.head || document.documentElement;
+        if (!root) return;
+        if (document.getElementById(KB_STYLE_TAG_ID)) {
+            __kbStyleInjected = true;
+            return;
+        }
+        const style = document.createElement('style');
+        style.id = KB_STYLE_TAG_ID;
+        style.textContent = KB_STYLE_TEXT;
+        root.append(style);
+        __kbStyleInjected = true;
+    }
+
+    function measureSync(label, fn) {
+        if (typeof performance === 'undefined' || typeof performance.mark !== 'function' || typeof performance.measure !== 'function') {
+            return fn();
+        }
+        __kbPerfMeasureSeq += 1;
+        const start = `${KB_PERF_PREFIX}:${label}:start:${__kbPerfMeasureSeq}`;
+        const end = `${KB_PERF_PREFIX}:${label}:end:${__kbPerfMeasureSeq}`;
+
+        performance.mark(start);
+        try {
+            return fn();
+        } finally {
+            try {
+                performance.mark(end);
+                performance.measure(`${KB_PERF_PREFIX}:${label}`, start, end);
+            } catch {
+                // Ignore perf timeline failures.
+            }
+            try {
+                performance.clearMarks(start);
+                performance.clearMarks(end);
+            } catch {
+                // Ignore cleanup failures.
+            }
+        }
+    }
+
+    // Best effort on initial load; createTransferButtons() also ensures styles.
+    ensureUiStyles();
 
     // Helper: Get config (storage + .api fallback via background)
     async function getConfig() {
@@ -589,80 +647,119 @@
 
     // Avoid repeated DOM churn: remember which blocks we've already processed.
     const __kbInjectedBlocks = new WeakSet();
+    const __kbPendingInjectedBlocks = new WeakSet();
+
+    const scheduleDomCommit = (() => {
+        let queued = false;
+        let pendingOps = [];
+
+        const run = () => {
+            queued = false;
+            const ops = pendingOps;
+            pendingOps = [];
+            if (!ops.length) return;
+
+            measureSync('dom_commit', () => {
+                for (const op of ops) {
+                    const block = op?.block;
+                    const wrapper = op?.wrapper;
+                    try {
+                        if (!block || !wrapper || !block.isConnected || __kbInjectedBlocks.has(block)) continue;
+                        if (op.mode === 'afterend') {
+                            block.insertAdjacentElement('afterend', wrapper);
+                        } else {
+                            block.append(wrapper);
+                        }
+                        __kbInjectedBlocks.add(block);
+                    } catch {
+                        // Ignore insertion failures and retry later via future scans.
+                    } finally {
+                        if (block) __kbPendingInjectedBlocks.delete(block);
+                    }
+                }
+            });
+        };
+
+        return (ops) => {
+            if (!ops || !ops.length) return;
+            pendingOps.push(...ops);
+            if (queued) return;
+            queued = true;
+            if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(run);
+            } else {
+                setTimeout(run, DOM_COMMIT_FALLBACK_DELAY_MS);
+            }
+        };
+    })();
 
     function injectButtons(passedBlocks = null) {
-        if (isNotebookLmHost) {
-            const now = Date.now();
-            if (now - __kbLastNotebookInjectAt < NOTEBOOK_INJECT_MIN_INTERVAL_MS) return;
-            __kbLastNotebookInjectAt = now;
-            injectNotebookLmButtons();
-            return;
-        }
-
-        // ChatGPT streams content; injecting mid-stream can place buttons in the middle.
-        // Only inject when generation is finished.
-        if (isChatGptHost && isChatGptGenerating()) return;
-
-        let blocks = (passedBlocks ? Array.from(passedBlocks) : getMessageBlocks())
-            .filter((b) => isEligibleBlock(b));
-
-        if (isChatGptHost && blocks.length > MAX_PENDING_BLOCKS) {
-            blocks = blocks.slice(-MAX_PENDING_BLOCKS);
-        }
-
-        // If we're doing a full scan (no passed blocks), prefer blocks near the viewport.
-        if (!passedBlocks && isChatGptHost) {
-            const visibleIdx = [];
-            const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-
-            blocks.forEach((block, idx) => {
-                const rect = block.getBoundingClientRect();
-                const isVisible = rect.bottom > 0 && rect.top < vh;
-                if (isVisible) visibleIdx.push(idx);
-            });
-
-            if (visibleIdx.length) {
-                const min = Math.max(0, Math.min(...visibleIdx) - 2);
-                const max = Math.min(blocks.length - 1, Math.max(...visibleIdx) + 2);
-                blocks = blocks.slice(min, max + 1);
-            } else if (blocks.length > 5) {
-                blocks = blocks.slice(-5);
-            }
-        }
-
-        blocks.forEach((block) => {
-            if (!block) return;
-            if (__kbInjectedBlocks.has(block)) return;
-
-            // If a wrapper already exists, treat as injected and don't touch DOM again.
-            // For ChatGPT, we may place the wrapper *after* the block (as a sibling) to avoid
-            // streaming updates pushing the wrapper into the middle of the answer.
-            const existingInside = block.querySelector('.kb-btn-wrapper');
-            const existingSibling = block.nextElementSibling && block.nextElementSibling.classList && block.nextElementSibling.classList.contains('kb-btn-wrapper')
-                ? block.nextElementSibling
-                : null;
-            if (existingInside || existingSibling) {
-                __kbInjectedBlocks.add(block);
+        measureSync('inject_buttons', () => {
+            if (isNotebookLmHost) {
+                const now = Date.now();
+                if (now - __kbLastNotebookInjectAt < NOTEBOOK_INJECT_MIN_INTERVAL_MS) return;
+                __kbLastNotebookInjectAt = now;
+                injectNotebookLmButtons();
                 return;
             }
 
-            const wrapper = createTransferButtons(block, false);
+            // ChatGPT streams content; injecting mid-stream can place buttons in the middle.
+            // Only inject when generation is finished.
+            if (isChatGptHost && isChatGptGenerating()) return;
 
-            if (isChatGptHost) {
-                // Critical: ChatGPT streams by appending nodes into the assistant block.
-                // If we append our wrapper into the block mid-stream, later nodes will appear *after* it,
-                // making the button land in the middle of the answer.
-                // Putting it after the block (sibling) keeps it visually at the end.
-                try {
-                    block.insertAdjacentElement('afterend', wrapper);
-                } catch {
-                    block.append(wrapper);
-                }
-            } else {
-                block.append(wrapper);
+            let blocks = (passedBlocks ? Array.from(passedBlocks) : getMessageBlocks())
+                .filter((b) => isEligibleBlock(b));
+
+            if (isChatGptHost && blocks.length > MAX_PENDING_BLOCKS) {
+                blocks = blocks.slice(-MAX_PENDING_BLOCKS);
             }
 
-            __kbInjectedBlocks.add(block);
+            // If we're doing a full scan (no passed blocks), prefer blocks near the viewport.
+            if (!passedBlocks && isChatGptHost) {
+                const visibleIdx = [];
+                const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+
+                blocks.forEach((block, idx) => {
+                    const rect = block.getBoundingClientRect();
+                    const isVisible = rect.bottom > 0 && rect.top < vh;
+                    if (isVisible) visibleIdx.push(idx);
+                });
+
+                if (visibleIdx.length) {
+                    const min = Math.max(0, Math.min(...visibleIdx) - 2);
+                    const max = Math.min(blocks.length - 1, Math.max(...visibleIdx) + 2);
+                    blocks = blocks.slice(min, max + 1);
+                } else if (blocks.length > 5) {
+                    blocks = blocks.slice(-5);
+                }
+            }
+
+            const domOps = [];
+
+            blocks.forEach((block) => {
+                if (!block) return;
+                if (__kbInjectedBlocks.has(block) || __kbPendingInjectedBlocks.has(block)) return;
+
+                // If a wrapper already exists, treat as injected and don't touch DOM again.
+                const existingInside = block.querySelector('.kb-btn-wrapper');
+                const existingSibling = block.nextElementSibling && block.nextElementSibling.classList && block.nextElementSibling.classList.contains('kb-btn-wrapper')
+                    ? block.nextElementSibling
+                    : null;
+                if (existingInside || existingSibling) {
+                    __kbInjectedBlocks.add(block);
+                    return;
+                }
+
+                const wrapper = createTransferButtons(block, false);
+                __kbPendingInjectedBlocks.add(block);
+                domOps.push({
+                    block,
+                    wrapper,
+                    mode: isChatGptHost ? 'afterend' : 'append'
+                });
+            });
+
+            scheduleDomCommit(domOps);
         });
     }
 
@@ -817,30 +914,25 @@
     }
 
     function createTransferButtons(block, notebookLmMode) {
+        ensureUiStyles();
         const wrapper = document.createElement('div');
-        wrapper.className = 'kb-btn-wrapper';
-        wrapper.style = getButtonWrapperStyle(notebookLmMode);
+        wrapper.className = notebookLmMode
+            ? 'kb-btn-wrapper kb-btn-wrapper--notebook'
+            : 'kb-btn-wrapper kb-btn-wrapper--chat';
 
         // Notion button intentionally hidden until Obsidian testing is complete.
-        const oBtn = createBtn('Send to Obsidian', '#483699');
+        const oBtn = createBtn('Send to Obsidian', 'kb-btn--obsidian');
         oBtn.onclick = () => handleTransfer(block, 'Obsidian');
 
         wrapper.append(oBtn);
         return wrapper;
     }
 
-    function getButtonWrapperStyle(notebookLmMode = false) {
-        if (notebookLmMode) {
-            return 'display: flex; gap: 8px; justify-content: flex-end; width: 100%; margin: 2px 0 8px;';
-        }
-        const baseStyle = 'display: flex; gap: 8px; margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee;';
-        return `${baseStyle} justify-content: flex-end; width: 100%; margin-left: auto; align-self: flex-end;`;
-    }
-
-    function createBtn(txt, bg) {
+    function createBtn(txt, variantClass) {
         const b = document.createElement('button');
-        b.innerText = txt;
-        b.style = `padding: 6px 14px; cursor: pointer; background: ${bg}; color: #fff; border: none; border-radius: 6px; font-weight: bold; font-size: 11px;`;
+        b.type = 'button';
+        b.textContent = txt;
+        b.className = ['kb-btn', variantClass].filter(Boolean).join(' ');
         return b;
     }
 
@@ -1062,37 +1154,39 @@
     }
 
     const mo = new MutationObserver((mutations) => {
-        const isGenerating = isChatGptHost ? isChatGptGenerating() : false;
-        if (isChatGptHost && isGenerating) {
-            armInjectAfterGeneration();
-            return;
-        }
-
-        const found = new Set();
-        let scannedNodes = 0;
-        for (const m of mutations) {
-            if (m.addedNodes && m.addedNodes.length) {
-                for (const n of m.addedNodes) {
-                    if (scannedNodes >= MAX_MUTATION_NODES_PER_BATCH || found.size >= MAX_PENDING_BLOCKS) break;
-                    scannedNodes += 1;
-                    if (n.nodeType === Node.ELEMENT_NODE && n.classList?.contains('kb-btn-wrapper')) continue;
-                    findRelevantBlocksFromNode(n).forEach((block) => {
-                        if (found.size < MAX_PENDING_BLOCKS) found.add(block);
-                    });
-                }
+        measureSync('mutation_observer', () => {
+            const isGenerating = isChatGptHost ? isChatGptGenerating() : false;
+            if (isChatGptHost && isGenerating) {
+                armInjectAfterGeneration();
+                return;
             }
-            if (scannedNodes >= MAX_MUTATION_NODES_PER_BATCH || found.size >= MAX_PENDING_BLOCKS) break;
-        }
 
-        if (found.size) {
-            scheduleInject(found);
-            return;
-        }
+            const found = new Set();
+            let scannedNodes = 0;
+            for (const m of mutations) {
+                if (m.addedNodes && m.addedNodes.length) {
+                    for (const n of m.addedNodes) {
+                        if (scannedNodes >= MAX_MUTATION_NODES_PER_BATCH || found.size >= MAX_PENDING_BLOCKS) break;
+                        scannedNodes += 1;
+                        if (n.nodeType === Node.ELEMENT_NODE && n.classList?.contains('kb-btn-wrapper')) continue;
+                        findRelevantBlocksFromNode(n).forEach((block) => {
+                            if (found.size < MAX_PENDING_BLOCKS) found.add(block);
+                        });
+                    }
+                }
+                if (scannedNodes >= MAX_MUTATION_NODES_PER_BATCH || found.size >= MAX_PENDING_BLOCKS) break;
+            }
 
-        // Heavy mutation burst fallback: do a tiny bounded scan of recent blocks.
-        if (isChatGptHost && scannedNodes >= MAX_MUTATION_NODES_PER_BATCH) {
-            scheduleInject(new Set(getMessageBlocks().slice(-3)));
-        }
+            if (found.size) {
+                scheduleInject(found);
+                return;
+            }
+
+            // Heavy mutation burst fallback: do a tiny bounded scan of recent blocks.
+            if (isChatGptHost && scannedNodes >= MAX_MUTATION_NODES_PER_BATCH) {
+                scheduleInject(new Set(getMessageBlocks().slice(-3)));
+            }
+        });
     });
 
     mo.observe(observeRoot, { childList: true, subtree: true });

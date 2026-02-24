@@ -47,6 +47,12 @@ const RENDERING_EVENT_NAMES = new Set([
     'Animation'
 ]);
 
+const KB_PERF_EVENT_NAMES = {
+    mutationObserver: 'kb:perf:mutation_observer',
+    injectButtons: 'kb:perf:inject_buttons',
+    domCommit: 'kb:perf:dom_commit'
+};
+
 function parseArgs(argv) {
     const options = { ...DEFAULTS };
     for (let i = 0; i < argv.length; i += 1) {
@@ -206,6 +212,12 @@ function microsToMillis(value) {
     return Number((value / 1000).toFixed(2));
 }
 
+function sumTimedEventDuration(events, eventName) {
+    return events
+        .filter((e) => e?.name === eventName && Number.isFinite(e?.dur))
+        .reduce((sum, e) => sum + e.dur, 0);
+}
+
 function parseTraceMetrics(traceText) {
     const parsed = JSON.parse(traceText);
     const events = Array.isArray(parsed.traceEvents) ? parsed.traceEvents : [];
@@ -233,13 +245,17 @@ function parseTraceMetrics(traceText) {
         .filter((e) => extractUrlsFromEvent(e).some((url) => /chrome-extension:\/\/.+\/content\.js/.test(url)))
         .reduce((sum, e) => sum + e.dur, 0);
 
-    const mutationObserverUs = timedEvents
+    const fallbackMutationObserverUs = timedEvents
         .filter((e) => {
             if (/mutationobserver/i.test(e.name || '')) return true;
             const fn = e?.args?.data?.functionName || '';
             return /mutationobserver/i.test(fn);
         })
         .reduce((sum, e) => sum + e.dur, 0);
+    const perfMutationObserverUs = sumTimedEventDuration(timedEvents, KB_PERF_EVENT_NAMES.mutationObserver);
+    const injectButtonsUs = sumTimedEventDuration(timedEvents, KB_PERF_EVENT_NAMES.injectButtons);
+    const domCommitUs = sumTimedEventDuration(timedEvents, KB_PERF_EVENT_NAMES.domCommit);
+    const mutationObserverUs = perfMutationObserverUs || fallbackMutationObserverUs;
 
     return {
         tbtMs,
@@ -248,6 +264,8 @@ function parseTraceMetrics(traceText) {
         renderingMs: microsToMillis(renderingUs),
         contentJsSelfMs: microsToMillis(contentJsUs),
         mutationObserverMs: microsToMillis(mutationObserverUs),
+        injectButtonsMs: microsToMillis(injectButtonsUs),
+        domCommitMs: microsToMillis(domCommitUs),
         traceEventCount: events.length
     };
 }
