@@ -656,6 +656,11 @@
         const clone = block.cloneNode(true);
         const btns = clone.querySelector('.kb-btn-wrapper');
         if (btns) btns.remove();
+        clone.querySelectorAll('button, [role="button"], input, textarea, select').forEach((el) => el.remove());
+        clone.querySelectorAll('[role="toolbar"], [class*="action" i], [class*="controls" i], [class*="footer" i]').forEach((el) => {
+            const buttonCount = el.querySelectorAll('button, [role="button"]').length;
+            if (buttonCount > 0 && getNodeTextLength(el) < 180) el.remove();
+        });
 
         let md = ts.turndown(clone);
         if (isObsidian) md = postProcessForObsidian(md);
@@ -682,6 +687,12 @@
     const __kbInjectedBlocks = new WeakSet();
     const __kbPendingInjectedBlocks = new WeakSet();
 
+    function getInsertModeForHost() {
+        // Gemini layout can break when controls are appended inside response blocks.
+        if (isChatGptHost || isGeminiHost) return 'afterend';
+        return 'append';
+    }
+
     const scheduleDomCommit = (() => {
         let queued = false;
         let pendingOps = [];
@@ -705,7 +716,15 @@
                         }
                         __kbInjectedBlocks.add(block);
                     } catch {
-                        // Ignore insertion failures and retry later via future scans.
+                        // Fallback to in-block append when sibling insertion fails.
+                        try {
+                            if (block && wrapper && block.isConnected && !__kbInjectedBlocks.has(block)) {
+                                block.append(wrapper);
+                                __kbInjectedBlocks.add(block);
+                            }
+                        } catch {
+                            // Ignore insertion failures and retry later via future scans.
+                        }
                     } finally {
                         if (block) __kbPendingInjectedBlocks.delete(block);
                     }
@@ -796,7 +815,7 @@
                 domOps.push({
                     block,
                     wrapper,
-                    mode: isChatGptHost ? 'afterend' : 'append'
+                    mode: getInsertModeForHost()
                 });
             });
 
@@ -890,19 +909,87 @@
         const rowRect = row.getBoundingClientRect();
         let best = null;
         let bestDistance = Number.POSITIVE_INFINITY;
+        let overlapBest = null;
+        let overlapDistance = Number.POSITIVE_INFINITY;
 
         blocks.forEach((block) => {
+            if (!block || !block.isConnected) return;
+            if (block === row) return;
+            if (block.contains(row)) return;
+
             const blockRect = block.getBoundingClientRect();
             if (blockRect.top > rowRect.top + 20) return;
-            const distance = Math.max(0, rowRect.top - blockRect.bottom);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                best = block;
+
+            const gap = rowRect.top - blockRect.bottom;
+            const hasMultiCopy = countCopyButtons(block) > 1;
+            if (hasMultiCopy && getNodeTextLength(block) > 300) return;
+
+            if (gap >= -20) {
+                const distance = Math.abs(gap);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = block;
+                }
+                return;
+            }
+
+            const distance = Math.abs(gap);
+            if (distance < overlapDistance) {
+                overlapDistance = distance;
+                overlapBest = block;
             }
         });
 
         if (best) return best;
+        if (overlapBest) return overlapBest;
+        const fromDom = findNotebookLmBlockNearRow(row);
+        if (fromDom) return fromDom;
         return blocks[blocks.length - 1] || null;
+    }
+
+    function countCopyButtons(root) {
+        if (!root || !root.querySelectorAll) return 0;
+        const buttons = root.querySelectorAll('button, [role="button"]');
+        let count = 0;
+        for (const button of buttons) {
+            if (isCopyButton(button)) count += 1;
+            if (count >= 2) return count;
+        }
+        return count;
+    }
+
+    function findNotebookLmBlockNearRow(row) {
+        if (!row) return null;
+
+        let cursor = row.previousElementSibling;
+        let hops = 0;
+        while (cursor && hops < 16) {
+            const score = getNotebookLmMessageScore(cursor);
+            if (isNotebookLmMessageCandidate(cursor, score, true) && !cursor.contains(row) && getNodeTextLength(cursor) > 60) {
+                return cursor;
+            }
+            cursor = cursor.previousElementSibling;
+            hops += 1;
+        }
+
+        let parent = row.parentElement;
+        let depth = 0;
+        while (parent && depth < 6) {
+            let prev = parent.previousElementSibling;
+            let siblingHops = 0;
+            while (prev && siblingHops < 8) {
+                const score = getNotebookLmMessageScore(prev);
+                if (isNotebookLmMessageCandidate(prev, score, true) && getNodeTextLength(prev) > 60) {
+                    return prev;
+                }
+                prev = prev.previousElementSibling;
+                siblingHops += 1;
+            }
+            parent = parent.parentElement;
+            depth += 1;
+        }
+
+        return null;
     }
 
     function maybeSelfHealChatGptInjection(trigger = 'unknown') {
