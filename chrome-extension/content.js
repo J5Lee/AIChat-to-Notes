@@ -319,6 +319,65 @@
         return `---\ndate: ${now}\nsource: ${platformName}\n---\n\n${md}`;
     }
 
+    function postProcessForNotebookLm(md) {
+        let out = (md || '').replace(/\r\n/g, '\n');
+
+        // NotebookLM UI artifacts that occasionally leak into the converted markdown.
+        out = out.replace(/^\s*🌍\s*$/gmu, '');
+        out = out.replace(/^이모티콘을 찾을 수 없음\s*$/gmi, '');
+        out = out.replace(/^로드 중\s*$/gmi, '');
+        out = out.replace(/^소스\s+\d+개\s*$/gmi, '');
+        out = out.replace(/^\d{1,2}월\s+\d{1,2}일\s+\S+\s*$/gmi, '');
+        out = out.replace(/^(오늘|어제)\s*[•·]\s*.+$/gmi, '');
+
+        // Fix compacted bullet lines found in NotebookLM answers.
+        out = out.replace(/([.!?])-\s+__/g, '$1\n- __');
+
+        const lines = out.split('\n');
+        const cleaned = [];
+        const questionMarker = '__KB_NOTEBOOKLM_USER_QUESTION__::';
+        const questionIndexes = [];
+
+        const isLikelyQuestionLine = (line) => {
+            const text = (line || '').trim();
+            if (!text) return false;
+            if (text.length > 120) return false;
+            if (/^[-*#>|`]/.test(text)) return false;
+            if (/[:：]$/.test(text)) return false;
+            if (/[?？]$/.test(text)) return true;
+            return /(뭐야|뭐지|어떻게|왜|언제|어디|누구|무엇|알려줘|찾아줘|인가요|일까|할까|이야)$/.test(text);
+        };
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) {
+                cleaned.push('');
+                continue;
+            }
+
+            if (isLikelyQuestionLine(trimmed)) {
+                questionIndexes.push(cleaned.length);
+                cleaned.push(`${questionMarker}${trimmed}`);
+                continue;
+            }
+            cleaned.push(line);
+        }
+
+        let finalLines = cleaned;
+        if (questionIndexes.length > 0) {
+            const lastQuestionIndex = questionIndexes[questionIndexes.length - 1];
+            finalLines = cleaned.slice(lastQuestionIndex + 1);
+        }
+
+        out = finalLines
+            .filter((line) => !line.trim().startsWith(questionMarker))
+            .join('\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+        return out;
+    }
+
     function getMessageBlocks() {
         if (isGeminiHost) return collectBlocksBySelectors(GEMINI_BLOCK_SELECTORS);
         if (isNotebookLmHost) return getNotebookLmMessageBlocks();
@@ -354,6 +413,11 @@
         const candidates = Array.from(blockSet);
         if (candidates.length <= 1) return candidates;
         return candidates.filter((node, idx, arr) => !arr.some((other, otherIdx) => otherIdx !== idx && other.contains(node)));
+    }
+
+    function keepMostSpecificNodes(nodes) {
+        if (!Array.isArray(nodes) || nodes.length <= 1) return nodes || [];
+        return nodes.filter((node, idx, arr) => !arr.some((other, otherIdx) => otherIdx !== idx && node.contains(other)));
     }
 
     function getNotebookLmMessageBlocks() {
@@ -429,9 +493,10 @@
         }
 
         const candidates = Array.from(blockSet);
-        const topCandidates = candidates
-            .filter((node) => getNodeTextLength(node) >= 80)
-            .filter((node, idx, arr) => !arr.some((other, otherIdx) => otherIdx !== idx && other.contains(node)))
+        const specificCandidates = keepMostSpecificNodes(
+            candidates.filter((node) => getNodeTextLength(node) >= 80)
+        );
+        const topCandidates = specificCandidates
             .map((node) => ({ node, score: getNotebookLmMessageScore(node) }))
             .filter(({ node, score }) => score >= (hasNotebookLmMessageHint(node) ? 42 : 72))
             .sort((a, b) => b.score - a.score)
@@ -444,7 +509,7 @@
                 .filter((node) => isNotebookLmMessageCandidate(node, getNotebookLmMessageScore(node), true))
                 .filter((node) => !node.closest('nav, header, aside, footer, form'));
 
-            const deduped = broadNodes.filter((node, idx, arr) => !arr.some((other, otherIdx) => otherIdx !== idx && other.contains(node)));
+            const deduped = keepMostSpecificNodes(broadNodes);
             const finalFallback = deduped
                 .sort((a, b) => getNotebookLmMessageScore(b) - getNotebookLmMessageScore(a))
                 .slice(0, 12);
@@ -663,6 +728,7 @@
         });
 
         let md = ts.turndown(clone);
+        if (isNotebookLmHost) md = postProcessForNotebookLm(md);
         if (isObsidian) md = postProcessForObsidian(md);
 
         return md;
