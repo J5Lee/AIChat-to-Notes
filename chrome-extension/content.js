@@ -18,6 +18,24 @@
     if (!shouldRunInFrame()) return;
 
     const CONFIG_KEYS = ['notionKey', 'notionParentId', 'notionParentType', 'obsidianUrl', 'obsidianKey', 'titleMode', 'llmBaseUrl', 'llmModel', 'autoTitleEnabled'];
+    const CHATGPT_BLOCK_SELECTOR = 'div[data-message-author-role="assistant"], article[data-testid^="conversation-turn-"][data-testid$="-assistant"], main article[data-testid*="assistant"]';
+    const CHATGPT_USER_SELECTOR = 'div[data-message-author-role="user"]';
+    const CHATGPT_STOP_SELECTOR = [
+        'button[data-testid="stop-button"]',
+        'button[aria-label*="stop generating" i]',
+        'button[aria-label*="stop" i]',
+        'button[aria-label*="정지" i]',
+        'button[title*="stop" i]',
+        'button[data-testid*="stop" i]'
+    ].join(',');
+    const CHATGPT_BUSY_SELECTOR = 'div[data-message-author-role="assistant"][aria-busy="true"], article[aria-busy="true"]';
+    const GENERATION_STATE_CACHE_TTL_MS = 250;
+    const MAX_PENDING_BLOCKS = 16;
+    const MAX_MUTATION_NODES_PER_BATCH = 60;
+    const NOTEBOOK_INJECT_MIN_INTERVAL_MS = 700;
+
+    let __kbGeneratingCache = { at: 0, value: false };
+    let __kbLastNotebookInjectAt = 0;
 
     // Helper: Get config (storage + .api fallback via background)
     async function getConfig() {
@@ -211,42 +229,40 @@
     }
 
     function getMessageBlocks() {
-        if (isGeminiHost) {
-            return Array.from(document.querySelectorAll('message-content'));
+        if (isGeminiHost) return Array.from(document.querySelectorAll('message-content'));
+        if (isNotebookLmHost) return getNotebookLmMessageBlocks();
+
+        // Hot path: keep ChatGPT scans narrow and deterministic.
+        if (isChatGptHost) return collectBlocksBySelectors([CHATGPT_BLOCK_SELECTOR]);
+
+        if (isClaudeHost) {
+            return collectBlocksBySelectors([
+                '[data-testid*="assistant" i]',
+                '[data-testid*="message" i][data-testid*="assistant" i]',
+                'div[class*="assistant" i]'
+            ]);
         }
 
-        if (isNotebookLmHost) {
-            return getNotebookLmMessageBlocks();
+        if (isPerplexityHost) {
+            return collectBlocksBySelectors([
+                'div[class*="answer" i]',
+                'div[class*="response" i]',
+                'div[class*="prose" i]'
+            ]);
         }
 
-        // NOTE: These selectors are intentionally broad to survive frequent DOM churn.
-        // - ChatGPT: data-message-author-role="assistant"
-        // - Claude: common patterns include assistant message containers with data-testid
-        // - Perplexity: often uses "prose"/"answer" containers
-        const selectors = [
-            // ChatGPT
-            'div[data-message-author-role="assistant"]',
-            'article[data-testid^="conversation-turn-"][data-testid$="-assistant"]',
-            'main article[data-testid*="assistant"]',
+        return [];
+    }
 
-            // Claude (best-effort)
-            '[data-testid*="assistant" i]',
-            '[data-testid*="message" i][data-testid*="assistant" i]',
-            'div[class*="assistant" i]',
-
-            // Perplexity (best-effort)
-            'div[class*="answer" i]',
-            'div[class*="response" i]',
-            'div[class*="prose" i]'
-        ];
-
+    function collectBlocksBySelectors(selectors) {
         const blockSet = new Set();
         selectors.forEach((selector) => {
             document.querySelectorAll(selector).forEach((el) => blockSet.add(el));
         });
 
         const candidates = Array.from(blockSet);
-        return candidates.filter((node) => !candidates.some((other) => other !== node && node.contains(other)));
+        if (candidates.length <= 1) return candidates;
+        return candidates.filter((node, idx, arr) => !arr.some((other, otherIdx) => otherIdx !== idx && other.contains(node)));
     }
 
     function getNotebookLmMessageBlocks() {
@@ -558,24 +574,17 @@
 
     function isChatGptGenerating() {
         if (!isChatGptHost) return false;
+        const now = Date.now();
+        if (now - __kbGeneratingCache.at < GENERATION_STATE_CACHE_TTL_MS) return __kbGeneratingCache.value;
 
-        // Best-effort: while generating, ChatGPT typically shows a stop button.
-        // ChatGPT UI changes frequently, so keep this selector list broad.
-        const stop = document.querySelector([
-            'button[data-testid="stop-button"]',
-            'button[aria-label*="stop generating" i]',
-            'button[aria-label*="stop" i]',
-            'button[aria-label*="정지" i]',
-            'button[title*="stop" i]',
-            'button[data-testid*="stop" i]'
-        ].join(','));
-        if (stop && isVisibleElement(stop)) return true;
-
-        // Another heuristic: ChatGPT sometimes marks the latest assistant turn as busy.
-        const busy = document.querySelector('div[data-message-author-role="assistant"][aria-busy="true"], article[aria-busy="true"]');
-        if (busy && isVisibleElement(busy)) return true;
-
-        return false;
+        const stop = document.querySelector(CHATGPT_STOP_SELECTOR);
+        const busy = document.querySelector(CHATGPT_BUSY_SELECTOR);
+        const generating = Boolean(
+            (stop && isVisibleElement(stop))
+            || (busy && isVisibleElement(busy))
+        );
+        __kbGeneratingCache = { at: now, value: generating };
+        return generating;
     }
 
     // Avoid repeated DOM churn: remember which blocks we've already processed.
@@ -583,6 +592,9 @@
 
     function injectButtons(passedBlocks = null) {
         if (isNotebookLmHost) {
+            const now = Date.now();
+            if (now - __kbLastNotebookInjectAt < NOTEBOOK_INJECT_MIN_INTERVAL_MS) return;
+            __kbLastNotebookInjectAt = now;
             injectNotebookLmButtons();
             return;
         }
@@ -593,6 +605,10 @@
 
         let blocks = (passedBlocks ? Array.from(passedBlocks) : getMessageBlocks())
             .filter((b) => isEligibleBlock(b));
+
+        if (isChatGptHost && blocks.length > MAX_PENDING_BLOCKS) {
+            blocks = blocks.slice(-MAX_PENDING_BLOCKS);
+        }
 
         // If we're doing a full scan (no passed blocks), prefer blocks near the viewport.
         if (!passedBlocks && isChatGptHost) {
@@ -841,7 +857,7 @@
                 if (isGeminiHost) return '';
                 if (isNotebookLmHost) return '';
                 // ChatGPT-like
-                const users = Array.from(document.querySelectorAll('div[data-message-author-role="user"]'));
+                const users = Array.from(document.querySelectorAll(CHATGPT_USER_SELECTOR));
                 const last = users[users.length - 1];
                 return (last?.innerText || '').trim();
             } catch {
@@ -958,22 +974,29 @@
     // observe DOM changes and inject only for newly-added assistant message blocks.
     function findRelevantBlocksFromNode(node) {
         const blocks = new Set();
-        if (!node) return blocks;
+        if (!node || !isChatGptHost) return blocks;
 
         const root = (node.nodeType === 1) ? node : node.parentElement;
-        if (!root) return blocks;
+        if (!root || !(root instanceof Element)) return blocks;
+        if (root.classList?.contains('kb-btn-wrapper')) return blocks;
 
-        // ChatGPT selector first (most stable + specific)
-        const chatgptSelector = 'div[data-message-author-role="assistant"], article[data-testid^="conversation-turn-"][data-testid$="-assistant"], main article[data-testid*="assistant"]';
-
-        const direct = root.closest ? root.closest(chatgptSelector) : null;
+        const direct = root.closest ? root.closest(CHATGPT_BLOCK_SELECTOR) : null;
         if (direct) blocks.add(direct);
 
-        if (root.matches && root.matches(chatgptSelector)) blocks.add(root);
+        if (root.matches && root.matches(CHATGPT_BLOCK_SELECTOR)) blocks.add(root);
 
-        // Also catch any blocks inside newly-added subtrees
-        if (root.querySelectorAll) {
-            root.querySelectorAll(chatgptSelector).forEach((el) => blocks.add(el));
+        if (blocks.size && root.childElementCount > 24) return blocks;
+        if (!root.querySelector) return blocks;
+
+        const first = root.querySelector(CHATGPT_BLOCK_SELECTOR);
+        if (first) blocks.add(first);
+
+        // For small subtrees, collect a few extra matches.
+        if (root.childElementCount > 0 && root.childElementCount <= 6 && root.querySelectorAll) {
+            const nested = root.querySelectorAll(CHATGPT_BLOCK_SELECTOR);
+            for (let index = 0; index < nested.length && index < 4; index += 1) {
+                blocks.add(nested[index]);
+            }
         }
 
         return blocks;
@@ -992,7 +1015,10 @@
 
         return (blocks) => {
             if (blocks && blocks.size) {
-                blocks.forEach((b) => pending.add(b));
+                for (const block of blocks) {
+                    pending.add(block);
+                    if (pending.size >= MAX_PENDING_BLOCKS) break;
+                }
             }
             if (queued) return;
             queued = true;
@@ -1036,21 +1062,37 @@
     }
 
     const mo = new MutationObserver((mutations) => {
-        if (isChatGptHost && isChatGptGenerating()) {
+        const isGenerating = isChatGptHost ? isChatGptGenerating() : false;
+        if (isChatGptHost && isGenerating) {
             armInjectAfterGeneration();
             return;
         }
 
         const found = new Set();
+        let scannedNodes = 0;
         for (const m of mutations) {
             if (m.addedNodes && m.addedNodes.length) {
-                m.addedNodes.forEach((n) => {
-                    findRelevantBlocksFromNode(n).forEach((b) => found.add(b));
-                });
+                for (const n of m.addedNodes) {
+                    if (scannedNodes >= MAX_MUTATION_NODES_PER_BATCH || found.size >= MAX_PENDING_BLOCKS) break;
+                    scannedNodes += 1;
+                    if (n.nodeType === Node.ELEMENT_NODE && n.classList?.contains('kb-btn-wrapper')) continue;
+                    findRelevantBlocksFromNode(n).forEach((block) => {
+                        if (found.size < MAX_PENDING_BLOCKS) found.add(block);
+                    });
+                }
             }
+            if (scannedNodes >= MAX_MUTATION_NODES_PER_BATCH || found.size >= MAX_PENDING_BLOCKS) break;
         }
 
-        if (found.size) scheduleInject(found);
+        if (found.size) {
+            scheduleInject(found);
+            return;
+        }
+
+        // Heavy mutation burst fallback: do a tiny bounded scan of recent blocks.
+        if (isChatGptHost && scannedNodes >= MAX_MUTATION_NODES_PER_BATCH) {
+            scheduleInject(new Set(getMessageBlocks().slice(-3)));
+        }
     });
 
     mo.observe(observeRoot, { childList: true, subtree: true });
