@@ -19,6 +19,8 @@
       "matches": [
         "https://gemini.google.com/*",
         "https://notebooklm.google.com/*",
+        "https://notebooklm.googleusercontent.com/*",
+        "https://*.notebooklm.googleusercontent.com/*",
         "https://chatgpt.com/*",
         "https://chat.openai.com/*",
         "https://claude.ai/*",
