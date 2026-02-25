@@ -4,8 +4,9 @@ __pycache__/
 .env
 .api
 chrome-extension/.api
+chrome-extension/node_modules/
 .idea/
 .vscode/
 .git*
 project.md
-output/playwright/
+output/
