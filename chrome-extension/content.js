@@ -33,6 +33,17 @@
         '[class*="model-response" i]',
         '[class*="response-container" i]'
     ];
+    const GEMINI_CONTAINER_SELECTOR = 'response-container, div.response-container';
+    const GEMINI_USER_SELECTORS = [
+        'user-query',
+        '[data-message-author-role="user"]',
+        'article[data-message-author-role="user"]',
+        '[class*="user-query" i]',
+        '[class*="query-text" i]',
+        '[class*="prompt-text" i]',
+        '[data-testid*="user" i]',
+        '[data-testid*="query" i]'
+    ];
     const CLAUDE_BLOCK_SELECTORS = [
         '[data-testid*="assistant" i]',
         '[data-testid*="message" i][data-testid*="assistant" i]',
@@ -71,8 +82,9 @@
     const KB_STYLE_TEXT = [
         '.kb-btn-wrapper{display:flex;gap:8px;justify-content:flex-end;width:100%;}',
         '.kb-btn-wrapper--chat{margin-top:15px;padding-top:10px;border-top:1px solid #eee;margin-left:auto;align-self:flex-end;}',
+        '.kb-btn-wrapper--gemini{margin-top:10px;padding-top:8px;border-top:1px solid #eceff5;}',
         '.kb-btn-wrapper--notebook{margin:2px 0 8px;}',
-        '.kb-btn{padding:6px 14px;cursor:pointer;color:#fff;border:none;border-radius:6px;font-weight:700;font-size:11px;line-height:1.2;}',
+        '.kb-btn{padding:6px 14px;cursor:pointer;color:#fff;border:none;border-radius:6px;font-weight:700;font-size:11px;line-height:1.2;white-space:nowrap;}',
         '.kb-btn--obsidian{background:#483699;}',
         '.kb-btn:disabled{opacity:.7;cursor:not-allowed;}'
     ].join('');
@@ -135,10 +147,36 @@
         return new Promise((resolve) => chrome.storage.local.get(CONFIG_KEYS, (items) => resolve(items || {})));
     }
 
+    function pad2(value) {
+        return String(value).padStart(2, '0');
+    }
+
+    function getLocalIsoTimestamp(date = new Date()) {
+        const year = date.getFullYear();
+        const month = pad2(date.getMonth() + 1);
+        const day = pad2(date.getDate());
+        const hour = pad2(date.getHours());
+        const minute = pad2(date.getMinutes());
+        const second = pad2(date.getSeconds());
+
+        const offsetMinutes = -date.getTimezoneOffset();
+        const sign = offsetMinutes >= 0 ? '+' : '-';
+        const absOffsetMinutes = Math.abs(offsetMinutes);
+        const offsetHour = pad2(Math.floor(absOffsetMinutes / 60));
+        const offsetMinute = pad2(absOffsetMinutes % 60);
+
+        return `${year}-${month}-${day}T${hour}:${minute}:${second}${sign}${offsetHour}:${offsetMinute}`;
+    }
+
+    function getLocalFileTimestamp(date = new Date()) {
+        // File-system safe variant of local ISO timestamp.
+        return getLocalIsoTimestamp(date).replace(/[:.]/g, '-');
+    }
+
     function generateAutoTitle() {
         // platform + creation time
         // Use a filename-safe timestamp (no ':' which breaks on Windows/macOS Finder sync tools)
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const ts = getLocalFileTimestamp();
         return `${platformName}-${ts}`;
     }
 
@@ -183,11 +221,12 @@
             .split('\n')
             .map((line) => line.trim())
             .filter(Boolean)
+            .map((line) => line.replace(/^\s*(?:think|thinking|reasoning|analysis)\b\s*[:\-]?\s*/i, '').trim())
             .map((line) => line.replace(/^\s*(?:final answer|final|answer|output|title|suggested title)\s*[:\-]\s*/i, '').trim())
             .filter(Boolean);
         if (!lines.length) return '';
 
-        const metaPattern = /\b(?:the user|assistant|prompt|response|question|task|let'?s|tackle|step by step|reasoning|analysis|think)\b/i;
+        const metaPattern = /\b(?:the user|assistant|prompt|response|question|task|source text|assistant content|user prompt|english only|single line|maximum|characters?|output only|noun-phrase|let'?s|tackle|step by step|reasoning|analysis|think)\b/i;
         let title = lines.find((line) => !metaPattern.test(line)) || lines[lines.length - 1] || lines[0];
         title = title.replace(/^["'`]+|["'`]+$/g, '').replace(/[*_`#~]/g, '').trim();
 
@@ -209,7 +248,20 @@
         if (title.length < 3 || title.length > 90) return true;
         if (/^\s*(?:think|thinking|analysis|reasoning|okay\b|let'?s)\b/i.test(title)) return true;
         if (/\b(?:the user|assistant|prompt|response|question|task)\b/i.test(title)) return true;
+        if (/\b(?:they|he|she|we)\s+(?:want|wants|asked|asks|requested|requests)\b/i.test(title)) return true;
+        if (/\b(?:note title|title generation|generated title|final answer)\b/i.test(title)) return true;
+        if (/\b(?:source text|assistant content|user prompt|english only|single line|maximum(?:\s+\d+)?|characters?(?:\s+including\s+spaces)?|output only|noun-phrase)\b/i.test(title)) return true;
+        if (/\b(?:korean|english)\b/i.test(title) && /\b(?:source|text|translate|output|title)\b/i.test(title)) return true;
+        if (/\b(?:so i|i will|i need to|i should)\b/i.test(title)) return true;
+        if (/^\s*(?:the\s+)?title(?:\s+(?:for|is))?\b/i.test(title)) return true;
+        const normalizedTokens = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+        const genericWords = new Set(['the', 'a', 'an', 'title', 'note', 'response', 'answer']);
+        if (normalizedTokens.length > 0 && normalizedTokens.every((token) => genericWords.has(token))) return true;
+        if (/^(?:the|a|an|title|response|answer|note)$/i.test(title.trim())) return true;
+        if (/^\".*\"$/.test(title.trim())) return true;
         const words = title.split(/\s+/).filter(Boolean).length;
+        const alphaWords = title.split(/\s+/).filter((word) => /[A-Za-z]/.test(word)).length;
+        if (alphaWords <= 1 && title.length <= 12) return true;
         return words > 16;
     }
 
@@ -235,12 +287,36 @@
                 && !/^```/.test(line)
                 && !/^\|/.test(line)
                 && !/^\$\$/.test(line)
+                && !/^(?:gemini의 응답|chatgpt|copy|복사|send to obsidian|대답이 마음에|옵션 더보기)$/i.test(line)
             ));
 
         const picked = lines[0] || '';
         if (!picked) return generateAutoTitle();
         const compact = picked.replace(/[*_`#~]/g, '').replace(/\s+/g, ' ').trim();
         return compact || generateAutoTitle();
+    }
+
+    function fallbackTitleFromPrompt(userPrompt) {
+        const prompt = String(userPrompt || '')
+            .replace(/\r\n/g, '\n')
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!prompt) return '';
+
+        const sanitized = prompt
+            .replace(/^[\"'`]+|[\"'`]+$/g, '')
+            .replace(/[?!.]+$/g, '')
+            .replace(/^(?:please|could you|can you|would you)\s+/i, '')
+            .replace(/\b(?:tell me|show me|give me|explain)\b\s*/i, '')
+            .trim();
+
+        if (!sanitized) return '';
+        return fitTitleLength(sanitized, 40);
     }
 
     async function generateTitleWithLocalLLM({ config, userPrompt, assistantMarkdown }) {
@@ -291,7 +367,7 @@
                 { role: 'user', content: extraInstruction ? `${user}\n\nExtra instruction: ${extraInstruction}` : user }
             ],
             temperature: 0.1,
-            max_tokens: 24
+            max_tokens: 48
         });
 
         let resp = await sendMessageAsync({
@@ -321,7 +397,15 @@
         if (!resp?.success) throw new Error(resp?.error || 'LLM title generation failed');
 
         if (isSuspiciousGeneratedTitle(title)) {
+            title = fallbackTitleFromPrompt(userPrompt);
+        }
+
+        if (isSuspiciousGeneratedTitle(title)) {
             title = fallbackTitleFromMarkdown(assistantMarkdown);
+        }
+
+        if (isSuspiciousGeneratedTitle(title)) {
+            title = generateAutoTitle();
         }
 
         return sanitizeFileName(fitTitleLength(title, 40), 40);
@@ -406,7 +490,7 @@
         // 8. Cleanup: Consolidate multiple spaces (but not newlines)
         md = md.replace(/ {2,}/g, ' ');
 
-        const now = new Date().toISOString();
+        const now = getLocalIsoTimestamp();
         return `---\ndate: ${now}\nsource: ${platformName}\n---\n\n${md}`;
     }
 
@@ -719,7 +803,7 @@
     }
 
     function getMessageBlocks() {
-        if (isGeminiHost) return collectBlocksBySelectors(GEMINI_BLOCK_SELECTORS);
+        if (isGeminiHost) return getGeminiMessageBlocks();
         if (isNotebookLmHost) return getNotebookLmMessageBlocks();
 
         // Hot path: keep ChatGPT scans narrow and deterministic.
@@ -738,7 +822,7 @@
 
     function getActiveHostBlockSelectors() {
         if (isChatGptHost) return [CHATGPT_BLOCK_SELECTOR];
-        if (isGeminiHost) return GEMINI_BLOCK_SELECTORS;
+        if (isGeminiHost) return [GEMINI_CONTAINER_SELECTOR];
         if (isClaudeHost) return CLAUDE_BLOCK_SELECTORS;
         if (isPerplexityHost) return PERPLEXITY_BLOCK_SELECTORS;
         return [];
@@ -758,6 +842,40 @@
     function keepMostSpecificNodes(nodes) {
         if (!Array.isArray(nodes) || nodes.length <= 1) return nodes || [];
         return nodes.filter((node, idx, arr) => !arr.some((other, otherIdx) => otherIdx !== idx && node.contains(other)));
+    }
+
+    function isGeminiMainLane(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 460 || rect.height < 80) return false;
+        const centerX = rect.left + (rect.width / 2);
+        const viewportCenterX = window.innerWidth / 2;
+        const maxDistance = Math.max(220, window.innerWidth * 0.28);
+        return Math.abs(centerX - viewportCenterX) <= maxDistance;
+    }
+
+    function getGeminiMessageBlocks() {
+        const root = document.querySelector('main') || document.body;
+        const directContainers = Array.from(root.querySelectorAll(GEMINI_CONTAINER_SELECTOR))
+            .filter((node) => node instanceof Element)
+            .filter((node) => !node.closest('nav, header, aside, footer, form'))
+            .filter((node) => isVisibleElement(node))
+            .filter((node) => getNodeTextLength(node) >= 30)
+            .filter((node) => (
+                node.querySelector('message-content, structured-content-container')
+                || /response-container|model-response/i.test((node.className || '').toString())
+            ));
+
+        const narrowed = keepMostSpecificNodes(directContainers);
+        const laneMatched = narrowed.filter((node) => isGeminiMainLane(node));
+        if (laneMatched.length) return laneMatched;
+        if (narrowed.length) return narrowed;
+
+        // Fallback for Gemini DOM changes.
+        return collectBlocksBySelectors(GEMINI_BLOCK_SELECTORS)
+            .filter((node) => isVisibleElement(node))
+            .filter((node) => getNodeTextLength(node) >= 60)
+            .filter((node) => isGeminiMainLane(node));
     }
 
     function getNotebookLmMessageBlocks() {
@@ -938,6 +1056,173 @@
         return ((node.innerText || '').trim().replace(/\s+/g, ' ').length);
     }
 
+    function cleanPromptText(rawText, maxChars = 800) {
+        const text = String(rawText || '')
+            .replace(/\r\n/g, '\n')
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .filter((line) => !/^(?:copy|copy code|share|edit|regenerate|send to obsidian|옵션 더보기|복사)$/i.test(line))
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!text) return '';
+        return text.slice(0, maxChars);
+    }
+
+    function extractReadableText(node, maxChars = 800) {
+        if (!node) return '';
+
+        try {
+            const clone = node.cloneNode(true);
+            clone.querySelectorAll('.kb-btn-wrapper, button, [role="button"], input, textarea, select, script, style').forEach((el) => el.remove());
+            return cleanPromptText(clone.innerText || clone.textContent || '', maxChars);
+        } catch {
+            return cleanPromptText(node.innerText || node.textContent || '', maxChars);
+        }
+    }
+
+    function isNodeBefore(node, target) {
+        if (!node || !target || node === target || !node.compareDocumentPosition) return false;
+        return Boolean(node.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }
+
+    function collectPreviousElements(startNode, maxDepth = 7, maxSiblingHops = 14) {
+        const results = [];
+        let current = startNode;
+        let depth = 0;
+
+        while (current && depth < maxDepth) {
+            let prev = current.previousElementSibling;
+            let hops = 0;
+            while (prev && hops < maxSiblingHops) {
+                results.push(prev);
+                prev = prev.previousElementSibling;
+                hops += 1;
+            }
+            current = current.parentElement;
+            depth += 1;
+        }
+
+        return results;
+    }
+
+    function findBySelectors(root, selectors) {
+        if (!root || !Array.isArray(selectors)) return null;
+        for (const selector of selectors) {
+            if (root.matches && root.matches(selector)) return root;
+            const child = root.querySelector ? root.querySelector(selector) : null;
+            if (child) return child;
+        }
+        return null;
+    }
+
+    function getChatGptUserPromptForBlock(block) {
+        if (!block) return '';
+
+        try {
+            const turn = block.closest('[data-testid^="conversation-turn-"]');
+            const turnId = turn?.getAttribute('data-testid') || '';
+            const match = turnId.match(/conversation-turn-(\d+)-assistant/i);
+
+            if (match) {
+                const turnIndex = Number(match[1]);
+                for (let offset = 0; offset <= 4; offset += 1) {
+                    const candidateIndex = turnIndex - offset;
+                    if (candidateIndex < 0) break;
+                    const candidate = document.querySelector(`[data-testid="conversation-turn-${candidateIndex}-user"]`);
+                    const text = extractReadableText(candidate);
+                    if (text) return text;
+                }
+            }
+
+            const users = Array.from(document.querySelectorAll(CHATGPT_USER_SELECTOR))
+                .filter((node) => node instanceof Element)
+                .filter((node) => isNodeBefore(node, block));
+            const nearest = users[users.length - 1];
+            const text = extractReadableText(nearest);
+            if (text) return text;
+        } catch {
+            return '';
+        }
+
+        return '';
+    }
+
+    function isGeminiLikelyAssistantNode(node) {
+        if (!node || !(node instanceof Element)) return false;
+        if (node.matches(GEMINI_CONTAINER_SELECTOR)) return true;
+        if (node.querySelector('message-content, structured-content-container')) return true;
+
+        const marker = [
+            node.getAttribute('data-message-author-role') || '',
+            node.getAttribute('data-testid') || '',
+            node.getAttribute('aria-label') || '',
+            (node.className || '').toString()
+        ].join(' ').toLowerCase();
+
+        return /\b(model|assistant|response)\b/.test(marker);
+    }
+
+    function getGeminiUserPromptForBlock(block) {
+        if (!block) return '';
+
+        const root = document.querySelector('main') || document.body;
+        const explicitCandidates = keepMostSpecificNodes(
+            GEMINI_USER_SELECTORS
+                .flatMap((selector) => Array.from(root.querySelectorAll(selector)))
+                .filter((node) => node instanceof Element)
+                .filter((node) => !node.closest('nav, header, aside, footer, form'))
+                .filter((node) => !isGeminiLikelyAssistantNode(node))
+                .filter((node) => {
+                    const len = getNodeTextLength(node);
+                    if (len < 3 || len > 500) return false;
+                    if (!isGeminiMainLane(node)) return false;
+                    return true;
+                })
+        );
+
+        const explicitBefore = explicitCandidates.filter((node) => isNodeBefore(node, block));
+        if (explicitBefore.length) {
+            const text = extractReadableText(explicitBefore[explicitBefore.length - 1]);
+            if (text) return text;
+        }
+
+        const nearbyCandidates = collectPreviousElements(block, 7, 12);
+        for (const candidate of nearbyCandidates) {
+            if (!candidate || !(candidate instanceof Element)) continue;
+            if (candidate.matches('nav, header, aside, footer, form')) continue;
+
+            const probe = findBySelectors(candidate, GEMINI_USER_SELECTORS) || candidate;
+            if (!probe || isGeminiLikelyAssistantNode(probe)) continue;
+            if (!isGeminiMainLane(probe)) continue;
+
+            const marker = [
+                probe.getAttribute('data-testid') || '',
+                probe.getAttribute('aria-label') || '',
+                (probe.className || '').toString()
+            ].join(' ').toLowerCase();
+            const len = getNodeTextLength(probe);
+            const hasPromptHint = /\b(user|query|prompt|question|질문)\b/.test(marker);
+
+            if (len < 3 || len > 320) continue;
+            if (!hasPromptHint && len > 180) continue;
+
+            const text = extractReadableText(probe);
+            if (text) return text;
+        }
+
+        return '';
+    }
+
+    function getUserPromptForBlock(block) {
+        if (!block) return '';
+        if (isChatGptHost) return getChatGptUserPromptForBlock(block);
+        if (isGeminiHost) return getGeminiUserPromptForBlock(block);
+        return '';
+    }
+
     function shouldRunInFrame() {
         if (window.self === window.top) return true;
         return Boolean(document.querySelector(
@@ -1094,8 +1379,7 @@
     const __kbPendingInjectedBlocks = new WeakSet();
 
     function getInsertModeForHost() {
-        // Gemini layout can break when controls are appended inside response blocks.
-        if (isChatGptHost || isGeminiHost) return 'afterend';
+        if (isChatGptHost) return 'afterend';
         return 'append';
     }
 
@@ -1158,6 +1442,11 @@
                 if (now - __kbLastNotebookInjectAt < NOTEBOOK_INJECT_MIN_INTERVAL_MS) return;
                 __kbLastNotebookInjectAt = now;
                 injectNotebookLmButtons();
+                return;
+            }
+
+            if (isGeminiHost) {
+                injectGeminiButtons();
                 return;
             }
 
@@ -1226,6 +1515,56 @@
             });
 
             scheduleDomCommit(domOps);
+        });
+    }
+
+    function findGeminiActionRow(block) {
+        if (!block) return null;
+        const rows = [
+            block.querySelector('.response-container-footer'),
+            block.querySelector('[class*="response-container-footer" i]'),
+            block.querySelector('[role="toolbar"]')
+        ].filter(Boolean);
+
+        for (const row of rows) {
+            if (isVisibleElement(row)) return row;
+        }
+
+        const copyButton = findCopyButton(block);
+        if (!copyButton) return null;
+        const row = getActionRowFromCopyButton(copyButton);
+        if (row && isVisibleElement(row)) return row;
+        return null;
+    }
+
+    function injectGeminiButtons() {
+        const blocks = getGeminiMessageBlocks().filter((node) => isEligibleBlock(node));
+        if (!blocks.length) return;
+
+        const blockSet = new Set(blocks);
+        document.querySelectorAll('.kb-btn-wrapper').forEach((wrapper) => {
+            if (wrapper.classList.contains('kb-btn-wrapper--notebook')) return;
+            const owner = wrapper.closest(GEMINI_CONTAINER_SELECTOR);
+            if (!owner || !blockSet.has(owner)) {
+                wrapper.remove();
+            }
+        });
+
+        blocks.forEach((block) => {
+            const wrappers = Array.from(block.querySelectorAll('.kb-btn-wrapper'))
+                .filter((wrapper) => !wrapper.classList.contains('kb-btn-wrapper--notebook'));
+            const hasValidGeminiWrapper = wrappers.length === 1 && wrappers[0].classList.contains('kb-btn-wrapper--gemini');
+            if (hasValidGeminiWrapper) return;
+
+            wrappers.forEach((wrapper) => wrapper.remove());
+
+            const wrapper = createTransferButtons(block, false, 'gemini');
+            const actionRow = findGeminiActionRow(block);
+            if (actionRow && actionRow.parentElement) {
+                actionRow.insertAdjacentElement('afterend', wrapper);
+            } else {
+                block.append(wrapper);
+            }
         });
     }
 
@@ -1546,12 +1885,16 @@
         return rect.width > 0 && rect.height > 0;
     }
 
-    function createTransferButtons(block, notebookLmMode) {
+    function createTransferButtons(block, notebookLmMode, hostMode = null) {
         ensureUiStyles();
         const wrapper = document.createElement('div');
-        wrapper.className = notebookLmMode
-            ? 'kb-btn-wrapper kb-btn-wrapper--notebook'
-            : 'kb-btn-wrapper kb-btn-wrapper--chat';
+        if (notebookLmMode) {
+            wrapper.className = 'kb-btn-wrapper kb-btn-wrapper--notebook';
+        } else if (hostMode === 'gemini') {
+            wrapper.className = 'kb-btn-wrapper kb-btn-wrapper--gemini';
+        } else {
+            wrapper.className = 'kb-btn-wrapper kb-btn-wrapper--chat';
+        }
 
         // Notion button intentionally hidden until Obsidian testing is complete.
         const oBtn = createBtn('Send to Obsidian', 'kb-btn--obsidian');
@@ -1575,20 +1918,8 @@
 
         const md = getConfiguredMarkdown(block, target);
 
-        // For LLM title generation, we want the user's last prompt if possible.
-        // Best-effort extraction (platforms differ).
-        const userPrompt = (() => {
-            try {
-                if (isGeminiHost) return '';
-                if (isNotebookLmHost) return '';
-                // ChatGPT-like
-                const users = Array.from(document.querySelectorAll(CHATGPT_USER_SELECTOR));
-                const last = users[users.length - 1];
-                return (last?.innerText || '').trim();
-            } catch {
-                return '';
-            }
-        })();
+        // Extract prompt near the selected assistant block (host-specific).
+        const userPrompt = getUserPromptForBlock(block);
 
         let title;
         if (titleMode === 'prompt') {
