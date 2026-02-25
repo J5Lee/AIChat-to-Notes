@@ -1,0 +1,25 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="docGradient" x1="72" y1="56" x2="430" y2="456" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2AC8F7"/>
+      <stop offset="0.38" stop-color="#6C44F1"/>
+      <stop offset="0.7" stop-color="#F240A7"/>
+      <stop offset="1" stop-color="#FFB445"/>
+    </linearGradient>
+    <linearGradient id="foldGradient" x1="330" y1="42" x2="430" y2="146" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EFC8FF" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#FF9FD5" stop-opacity="0.8"/>
+    </linearGradient>
+  </defs>
+
+  <path
+    d="M132 40H318L420 142V428C420 457 397 480 368 480H132C103 480 80 457 80 428V92C80 63 103 40 132 40Z"
+    fill="url(#docGradient)"
+  />
+
+  <path
+    d="M318 40L420 142H368A50 50 0 0 1 318 92V40Z"
+    fill="url(#foldGradient)"
+  />
+
+</svg>
