@@ -168,6 +168,81 @@
         });
     }
 
+    function normalizeGeneratedTitle(rawTitle) {
+        let text = String(rawTitle || '').replace(/\r\n/g, '\n').trim();
+        if (!text) return '';
+
+        // Strip fenced wrappers sometimes returned by local models.
+        text = text.replace(/^```[a-zA-Z0-9_-]*\n?/g, '').replace(/\n?```$/g, '').trim();
+
+        // Drop explicit reasoning blocks if the model ignored the instruction.
+        text = text.replace(/<think>[\s\S]*?<\/think>/gi, ' ').trim();
+        text = text.replace(/<\/?(analysis|reasoning)>/gi, ' ').trim();
+
+        const lines = text
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => line.replace(/^\s*(?:final answer|final|answer|output|title|suggested title)\s*[:\-]\s*/i, '').trim())
+            .filter(Boolean);
+        if (!lines.length) return '';
+
+        const metaPattern = /\b(?:the user|assistant|prompt|response|question|task|let'?s|tackle|step by step|reasoning|analysis|think)\b/i;
+        let title = lines.find((line) => !metaPattern.test(line)) || lines[lines.length - 1] || lines[0];
+        title = title.replace(/^["'`]+|["'`]+$/g, '').replace(/[*_`#~]/g, '').trim();
+
+        if (title.length > 70 || metaPattern.test(title)) {
+            const sentenceCandidate = title
+                .split(/[.!?]\s+/)
+                .map((part) => part.trim())
+                .find((part) => part && part.length <= 60 && !metaPattern.test(part));
+            if (sentenceCandidate) title = sentenceCandidate;
+        }
+
+        return title.replace(/\s+/g, ' ').replace(/[.,;:!?]+$/g, '').trim();
+    }
+
+    function isSuspiciousGeneratedTitle(title) {
+        if (!title) return true;
+        if (/[\n\r]/.test(title)) return true;
+        if (/[\uAC00-\uD7AF]/.test(title)) return true;
+        if (title.length < 3 || title.length > 90) return true;
+        if (/^\s*(?:think|thinking|analysis|reasoning|okay\b|let'?s)\b/i.test(title)) return true;
+        if (/\b(?:the user|assistant|prompt|response|question|task)\b/i.test(title)) return true;
+        const words = title.split(/\s+/).filter(Boolean).length;
+        return words > 16;
+    }
+
+    function fitTitleLength(title, maxChars = 40) {
+        const clean = String(title || '').replace(/\s+/g, ' ').trim();
+        if (!clean) return '';
+        if (clean.length <= maxChars) return clean;
+        const sliced = clean.slice(0, maxChars);
+        return sliced.replace(/\s+\S*$/g, '').trim() || clean.slice(0, maxChars).trim();
+    }
+
+    function fallbackTitleFromMarkdown(assistantMarkdown) {
+        const source = String(assistantMarkdown || '').replace(/^---[\s\S]*?---\n\n/, '');
+        const lines = source
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => line.replace(/^#{1,6}\s+/, '').replace(/^\d+\.\s+/, '').replace(/^[-*+]\s+/, '').trim())
+            .filter((line) => (
+                line
+                && line.length >= 6
+                && line.length <= 100
+                && !/^```/.test(line)
+                && !/^\|/.test(line)
+                && !/^\$\$/.test(line)
+            ));
+
+        const picked = lines[0] || '';
+        if (!picked) return generateAutoTitle();
+        const compact = picked.replace(/[*_`#~]/g, '').replace(/\s+/g, ' ').trim();
+        return compact || generateAutoTitle();
+    }
+
     async function generateTitleWithLocalLLM({ config, userPrompt, assistantMarkdown }) {
         const baseUrl = (config?.llmBaseUrl || 'http://127.0.0.1:1234').replace(/\/+$/g, '');
         let model = (config?.llmModel || '').trim();
@@ -191,13 +266,16 @@
             'You generate concise note titles.',
             'Output MUST be English only.',
             'Output ONLY the title text: no quotes, no markdown, no trailing period.',
-            'Avoid file-name forbidden chars: \\ / : * ? " < > |'
+            'Avoid file-name forbidden chars: \\ / : * ? " < > |',
+            'Do not output reasoning, analysis, or any preface.'
         ].join(' ');
 
         const user = [
-            'Task: Create a short, clear English note title (4-10 words).',
+            'Task: Create a short, clear English note title.',
             'If the source text is Korean or mixed-language, translate concepts to English and still output English.',
             'Return ONLY the title text on a single line.',
+            'Maximum 40 characters including spaces.',
+            'Use concise noun-phrase style (not a full sentence).',
             '',
             'User prompt:',
             up,
@@ -212,8 +290,8 @@
                 { role: 'system', content: system },
                 { role: 'user', content: extraInstruction ? `${user}\n\nExtra instruction: ${extraInstruction}` : user }
             ],
-            temperature: 0.2,
-            max_tokens: 32
+            temperature: 0.1,
+            max_tokens: 24
         });
 
         let resp = await sendMessageAsync({
@@ -224,20 +302,29 @@
 
         if (!resp?.success) throw new Error(resp?.error || 'LLM title generation failed');
 
-        let title = (resp?.title || '').trim();
+        let title = normalizeGeneratedTitle(resp?.title || '');
 
-        // If the model ignored the instruction and returned Korean, retry once with stricter constraints.
-        if (/[\uAC00-\uD7AF]/.test(title)) {
+        // Retry once when output is noisy (reasoning/preface/Korean/too long).
+        if (isSuspiciousGeneratedTitle(title)) {
             resp = await sendMessageAsync({
                 action: 'llmChatCompletions',
                 url: `${baseUrl}/v1/chat/completions`,
-                body: makeBody('Rewrite the title in English ONLY. Use ASCII letters/spaces/digits if possible. Return ONE line only.')
+                body: makeBody(
+                    'Return exactly one concise English title line. '
+                    + 'No thinking text, no explanation, no labels, no quotes. '
+                    + 'Max 40 characters.'
+                )
             });
-            if (resp?.success) title = (resp?.title || '').trim();
+            if (resp?.success) title = normalizeGeneratedTitle(resp?.title || '');
         }
 
         if (!resp?.success) throw new Error(resp?.error || 'LLM title generation failed');
-        return sanitizeFileName(title);
+
+        if (isSuspiciousGeneratedTitle(title)) {
+            title = fallbackTitleFromMarkdown(assistantMarkdown);
+        }
+
+        return sanitizeFileName(fitTitleLength(title, 40), 40);
     }
 
     /**
@@ -292,6 +379,10 @@
         // immediately after a closing $$ without a blank line.
         md = md.replace(/(\n\$\$)\n(?=\|)/g, '$1\n\n');
 
+        // 3.7. [TABLE NORMALIZATION] Normalize markdown table rows and force blank-line
+        // boundaries so Obsidian consistently recognizes tables in Reading/Live Preview.
+        md = transformOutsideCodeFences(md, normalizeMarkdownTablesForObsidian);
+
         // 4. [LIST SPACING FIX] Remove blank lines between consecutive list items
         md = md.replace(/^(\d+\..+)\n\n(?=\d+\.)/gm, '$1\n');
         md = md.replace(/^(-.+)\n\n(?=-\s)/gm, '$1\n');
@@ -331,6 +422,8 @@
         out = out.replace(/^(오늘|어제)\s*[•·]\s*.+$/gmi, '');
 
         // Fix compacted bullet lines found in NotebookLM answers.
+        out = out.replace(/([.!?])-\s+/g, '$1\n- ');
+        out = out.replace(/([가-힣A-Za-z0-9)])-\s+\$/g, '$1\n- $');
         out = out.replace(/([.!?])-\s+__/g, '$1\n- __');
 
         const lines = out.split('\n');
@@ -375,7 +468,254 @@
             .replace(/\n{3,}/g, '\n\n')
             .trim();
 
+        out = transformOutsideCodeFences(out, normalizeNotebookLmTables);
+        out = transformOutsideCodeFences(out, normalizeNotebookLmHeadings);
+
         return out;
+    }
+
+    function transformOutsideCodeFences(markdown, transformer) {
+        if (!markdown) return '';
+        if (typeof transformer !== 'function') return markdown;
+        const parts = markdown.split(/(```[\s\S]*?```)/g);
+        return parts
+            .map((part) => (part.startsWith('```') ? part : transformer(part)))
+            .join('');
+    }
+
+    function normalizeNotebookLmTables(markdown) {
+        const lines = markdown.split('\n');
+        const isSeparatorRow = (text) => /^\|\s*:?[-]+:?\s*(\|\s*:?[-]+:?\s*)+\|?$/.test(text);
+        const isPipeLine = (text) => text.startsWith('|');
+        const getPrevNonEmptyText = (idx) => {
+            for (let cursor = idx - 1; cursor >= 0; cursor -= 1) {
+                const text = lines[cursor].trim();
+                if (text) return text;
+            }
+            return '';
+        };
+        const getNextNonEmptyText = (idx) => {
+            for (let cursor = idx + 1; cursor < lines.length; cursor += 1) {
+                const text = lines[cursor].trim();
+                if (text) return text;
+            }
+            return '';
+        };
+        const isFragmentLine = (idx) => {
+            const text = lines[idx].trim();
+            if (isPipeLine(text)) return true;
+
+            const prevText = getPrevNonEmptyText(idx);
+            const nextText = getNextNonEmptyText(idx);
+            if (!text) return isPipeLine(prevText) || isPipeLine(nextText);
+
+            if (text.length > 220) return false;
+            return isPipeLine(prevText) && isPipeLine(nextText);
+        };
+        const getColumns = (text) => text.split('|').map((part) => part.trim()).filter(Boolean);
+        const toRow = (cells, colCount) => {
+            const normalized = cells
+                .map((cell) => (cell || '').trim().replace(/\s+/g, ' '))
+                .slice(0, colCount);
+            while (normalized.length < colCount) normalized.push('');
+            return `| ${normalized.join(' | ')} |`;
+        };
+
+        const parseFragmentRows = (fragmentLines, colCount) => {
+            const tokens = [];
+            fragmentLines.forEach((line) => {
+                const text = (line || '').trim();
+                if (!text) return;
+
+                if (text === '|') return;
+
+                if (text.includes('|')) {
+                    const cells = getColumns(text);
+                    if (!cells.length) return;
+                    tokens.push(...cells);
+                    return;
+                }
+
+                tokens.push(text);
+            });
+
+            const rows = [];
+            for (let cursor = 0; cursor + colCount <= tokens.length; cursor += colCount) {
+                rows.push(tokens.slice(cursor, cursor + colCount));
+            }
+            if (!rows.length && tokens.length) rows.push(tokens.slice(0, colCount));
+            return rows;
+        };
+
+        const result = [];
+        let cursor = 0;
+        let index = 0;
+
+        while (index < lines.length) {
+            const sepText = lines[index].trim();
+            if (!isSeparatorRow(sepText)) {
+                index += 1;
+                continue;
+            }
+
+            const separatorColumns = getColumns(sepText);
+            const colCount = separatorColumns.length;
+            if (colCount < 2) {
+                index += 1;
+                continue;
+            }
+
+            let start = index - 1;
+            while (start >= cursor && isFragmentLine(start)) start -= 1;
+            start += 1;
+
+            let end = index + 1;
+            while (end < lines.length && isFragmentLine(end)) end += 1;
+
+            const headerRows = parseFragmentRows(lines.slice(start, index), colCount);
+            const bodyRows = parseFragmentRows(lines.slice(index + 1, end), colCount);
+            if (!headerRows.length) {
+                index += 1;
+                continue;
+            }
+
+            result.push(...lines.slice(cursor, start));
+            result.push(toRow(headerRows[0], colCount));
+            result.push(`| ${separatorColumns.join(' | ')} |`);
+            bodyRows.forEach((row) => result.push(toRow(row, colCount)));
+
+            cursor = end;
+            index = end;
+        }
+
+        result.push(...lines.slice(cursor));
+        return result.join('\n');
+    }
+
+    function normalizeNotebookLmHeadings(markdown) {
+        const lines = markdown.split('\n');
+        const findNextNonEmptyIndex = (startIndex) => {
+            for (let idx = startIndex; idx < lines.length; idx += 1) {
+                if (lines[idx].trim()) return idx;
+            }
+            return -1;
+        };
+
+        for (let index = 0; index < lines.length; index += 1) {
+            const text = lines[index].trim();
+            if (!text) continue;
+
+            if (/^#{1,6}\s/.test(text)) continue;
+            if (/^[-*+]\s+/.test(text)) continue;
+            if (/^>\s?/.test(text)) continue;
+            if (/^\|/.test(text)) continue;
+            if (/^```/.test(text)) continue;
+            if (/^\$\$/.test(text)) continue;
+            if (/^[-=_]{3,}$/.test(text)) continue;
+            if (text.length < 6 || text.length > 90) continue;
+            if (/^[\"'“‘]/.test(text)) continue;
+            if (/[.!?]$/.test(text)) continue;
+            if (/(니다|다)\.$/.test(text)) continue;
+
+            const prevText = index > 0 ? lines[index - 1].trim() : '';
+            const prevBlank = index === 0 || !lines[index - 1].trim();
+            const nextBlank = index === lines.length - 1 || !lines[index + 1].trim();
+
+            const isNumericSection = /^\d+\.\s+/.test(text);
+            const prevBoundary = prevBlank || prevText === '$$' || /^[-=_]{3,}$/.test(prevText) || prevText.startsWith('|');
+            if (isNumericSection) {
+                if (!prevBoundary) continue;
+                const nextNonEmptyIndex = findNextNonEmptyIndex(index + 1);
+                if (nextNonEmptyIndex !== -1) {
+                    const nextText = lines[nextNonEmptyIndex].trim();
+                    if (nextText.length < 12) continue;
+                }
+                lines[index] = `## ${text}`;
+                continue;
+            }
+
+            if (!prevBlank || !nextBlank) continue;
+            const nextNonEmptyIndex = findNextNonEmptyIndex(index + 1);
+            if (nextNonEmptyIndex === -1) continue;
+            const nextText = lines[nextNonEmptyIndex].trim();
+            if (nextText.length < 24) continue;
+
+            const hasHeadingCue = /\([^)]+\)$/.test(text)
+                || /^(차세대|주요|환경|결론|요약|개요|정리|비교)/.test(text);
+            if (!hasHeadingCue) continue;
+
+            lines[index] = `## ${text}`;
+        }
+
+        return lines.join('\n');
+    }
+
+    function normalizeMarkdownTablesForObsidian(markdown) {
+        const lines = String(markdown || '').split('\n');
+        const isTableSeparator = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+        const isTableRow = (line) => {
+            const text = (line || '').trim();
+            if (!text) return false;
+            if (text.startsWith('```')) return false;
+            if (text.startsWith('>')) return false;
+            return /^\s*\|.*\|\s*$/.test(text);
+        };
+        const parseColumns = (line) => (
+            String(line || '')
+                .trim()
+                .replace(/^\|/, '')
+                .replace(/\|$/, '')
+                .split('|')
+                .map((part) => part.trim())
+                .filter((part) => part.length > 0)
+        );
+        const normalizeRow = (line, colCount) => {
+            const cols = parseColumns(line);
+            const clipped = cols.slice(0, colCount);
+            while (clipped.length < colCount) clipped.push('');
+            return `| ${clipped.join(' | ')} |`;
+        };
+
+        const output = [];
+        let index = 0;
+        while (index < lines.length) {
+            const line = lines[index];
+            const next = lines[index + 1];
+            const isTableHead = isTableRow(line) && isTableSeparator(next || '');
+
+            if (!isTableHead) {
+                output.push(line);
+                index += 1;
+                continue;
+            }
+
+            const sepCols = parseColumns(next);
+            const colCount = sepCols.length;
+            if (colCount < 2) {
+                output.push(line);
+                index += 1;
+                continue;
+            }
+
+            if (output.length > 0 && output[output.length - 1].trim()) {
+                output.push('');
+            }
+
+            output.push(normalizeRow(line, colCount));
+            output.push(`| ${sepCols.join(' | ')} |`);
+            index += 2;
+
+            while (index < lines.length && isTableRow(lines[index])) {
+                output.push(normalizeRow(lines[index], colCount));
+                index += 1;
+            }
+
+            if (index < lines.length && lines[index].trim()) {
+                output.push('');
+            }
+        }
+
+        return output.join('\n').replace(/\n{3,}/g, '\n\n');
     }
 
     function getMessageBlocks() {
@@ -906,20 +1246,16 @@
         });
 
         const actionRows = getNotebookLmActionRows();
-        if (actionRows.length === 0) {
-            blocks.forEach((block) => {
-                const wrapper = createTransferButtons(block, true);
-                block.append(wrapper);
-            });
+        const targetBlock = pickNotebookLmTargetBlock(blocks);
+        if (!targetBlock) return;
+
+        const targetRow = pickNotebookLmTargetRow(targetBlock, actionRows);
+        const wrapper = createTransferButtons(targetBlock, true);
+        if (targetRow && targetRow.parentElement) {
+            targetRow.parentElement.insertBefore(wrapper, targetRow);
             return;
         }
-
-        actionRows.forEach((row) => {
-            const block = findClosestBlockAboveRow(row, blocks);
-            if (!block || !row.parentElement) return;
-            const wrapper = createTransferButtons(block, true);
-            row.parentElement.insertBefore(wrapper, row);
-        });
+        targetBlock.append(wrapper);
     }
 
     function findNotebookLmActionRow(block) {
@@ -1011,6 +1347,69 @@
         const fromDom = findNotebookLmBlockNearRow(row);
         if (fromDom) return fromDom;
         return blocks[blocks.length - 1] || null;
+    }
+
+    function isNotebookLmCentralLane(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 220 || rect.height < 20) return false;
+        if (window.innerWidth < 1000) return true;
+
+        const centerX = rect.left + (rect.width / 2);
+        const viewportCenterX = window.innerWidth / 2;
+        const maxDistance = window.innerWidth * 0.22;
+        return Math.abs(centerX - viewportCenterX) <= maxDistance;
+    }
+
+    function pickNotebookLmTargetBlock(blocks) {
+        if (!blocks || blocks.length === 0) return null;
+        const centralBlocks = blocks.filter((block) => isNotebookLmCentralLane(block));
+        const pool = centralBlocks.length ? centralBlocks : blocks;
+        if (pool.length === 1) return pool[0];
+
+        let best = null;
+        let bestTop = Number.NEGATIVE_INFINITY;
+        pool.forEach((block) => {
+            const rect = block.getBoundingClientRect();
+            if (rect.top > bestTop) {
+                bestTop = rect.top;
+                best = block;
+            }
+        });
+        return best || pool[pool.length - 1] || null;
+    }
+
+    function pickNotebookLmTargetRow(targetBlock, actionRows) {
+        if (!targetBlock || !actionRows || actionRows.length === 0) return null;
+        const blockRect = targetBlock.getBoundingClientRect();
+        const blockCenterX = blockRect.left + (blockRect.width / 2);
+        const centralRows = actionRows.filter((row) => isNotebookLmCentralLane(row));
+        const rows = centralRows.length ? centralRows : actionRows;
+
+        let best = null;
+        let bestScore = Number.POSITIVE_INFINITY;
+        rows.forEach((row) => {
+            if (!row || !row.getBoundingClientRect) return;
+            const rowRect = row.getBoundingClientRect();
+            const rowCenterX = rowRect.left + (rowRect.width / 2);
+            const verticalGap = rowRect.top - blockRect.bottom;
+            const horizontalGap = Math.abs(rowCenterX - blockCenterX);
+
+            // NotebookLM has copy/action rows in multiple lanes (chat body + studio panel).
+            // Keep only rows that overlap the chat message lane on the X axis.
+            const horizontalOverlap = Math.min(blockRect.right, rowRect.right) - Math.max(blockRect.left, rowRect.left);
+            const sameLane = horizontalOverlap >= 32 || horizontalGap <= Math.max(140, blockRect.width * 0.2);
+            if (!sameLane) return;
+
+            if (verticalGap < -220 || verticalGap > 520) return;
+            const score = Math.abs(verticalGap) + (horizontalGap * 0.35);
+            if (score < bestScore) {
+                bestScore = score;
+                best = row;
+            }
+        });
+
+        return best;
     }
 
     function countCopyButtons(root) {
