@@ -1,0 +1,34 @@
+#!/bin/zsh
+set -euo pipefail
+
+# Shared post-push hook template.
+# Trigger an immediate pull on the peer machine after a successful push.
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_NAME="$(basename "$REPO_DIR")"
+PEER_SSH="$(git config --get sync.peerSsh || true)"
+PEER_WORKTREE="$(git config --get sync.peerWorktree || true)"
+
+# Default worktree path (adjustable via git config)
+[ -n "$PEER_WORKTREE" ] || PEER_WORKTREE="$REPO_DIR"
+
+if [ -z "$PEER_SSH" ]; then
+  echo "[post-push] sync.peerSsh not set; skipping peer pull" >&2
+  exit 0
+fi
+
+LOCAL_LOG="$REPO_DIR/.git-auto-post-push.log"
+
+{
+  echo "$(date '+%F %T') [post-push] repo=$REPO_NAME peer=$PEER_SSH worktree=$PEER_WORKTREE"
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$PEER_SSH" \
+      "cd '$PEER_WORKTREE' && /bin/zsh .git-auto-pull.sh"; then
+    echo "$(date '+%F %T') [post-push] peer pull ok"
+  else
+    RC=$?
+    echo "$(date '+%F %T') [post-push] peer pull FAILED rc=$RC"
+    echo "[post-push] WARN: peer pull failed (rc=$RC). See $LOCAL_LOG" >&2
+  fi
+} >> "$LOCAL_LOG" 2>&1
+
+exit 0

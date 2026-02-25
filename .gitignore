@@ -7,6 +7,15 @@ chrome-extension/.api
 chrome-extension/node_modules/
 .idea/
 .vscode/
-.git*
+.git-auto-pull.log
+.git-auto-pull.launchd.*
+.git-auto-pull.sh
+.git-auto-post-push.log
+.DS_Store
+
+# OpenClaw agent scratch
+.agent/
+.agents/
+
 project.md
 output/
